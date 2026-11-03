@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.0" creator="planet-dump-ng test X.Y.Z" xmlns="http://www.topografix.com/GPX/1/0" xmlns:osm="https://www.openstreetmap.org/gpx/0.1">
+ <author>OpenStreetMap and contributors</author>
+ <url>http://opendatacommons.org/licenses/odbl/1-0/</url>
+ <time>2013-08-01T12:00:00Z</time>
+ <trk>
+  <name>Morning ride</name>
+  <desc>Vaduz &lt;loop&gt; &amp; back</desc>
+  <osm:id>1</osm:id>
+  <osm:tag>vaduz</osm:tag>
+  <osm:tag>bike</osm:tag>
+  <trkseg>
+   <trkpt lat="47.1400000" lon="9.5200000">
+    <ele>450.50</ele>
+    <time>2013-08-01T10:00:00Z</time>
+   </trkpt>
+   <trkpt lat="47.1410000" lon="9.5210000">
+    <ele>455.00</ele>
+    <time>2013-08-01T10:00:10Z</time>
+   </trkpt>
+   <trkpt lat="47.1420000" lon="9.5220000">
+    <time>2013-08-01T10:00:20Z</time>
+   </trkpt>
+   <trkpt lat="47.1430000" lon="9.5230000">
+    <ele>460.00</ele>
+   </trkpt>
+  </trkseg>
+  <trkseg>
+   <trkpt lat="47.1500000" lon="9.5300000">
+    <ele>470.00</ele>
+    <time>2013-08-01T10:01:40Z</time>
+   </trkpt>
+  </trkseg>
+ </trk>
+ <trk>
+  <osm:id>2</osm:id>
+  <trkseg>
+   <trkpt lat="47.1000000" lon="9.5000000">
+    <time>1970-01-01T00:00:00Z</time>
+   </trkpt>
+  </trkseg>
+ </trk>
+ <trk>
+  <name>bad?name</name>
+  <desc>no url</desc>
+  <osm:id>6</osm:id>
+  <trkseg>
+   <trkpt lat="47.1600000" lon="9.5400000"/>
+  </trkseg>
+ </trk>
+ <trk>
+  <name>Single point</name>
+  <desc></desc>
+  <osm:id>8</osm:id>
+  <osm:tag>a&lt;b</osm:tag>
+  <trkseg>
+   <trkpt lat="47.1700000" lon="9.5500000">
+    <ele>480.00</ele>
+    <time>1969-12-31T23:59:59Z</time>
+   </trkpt>
+  </trkseg>
+ </trk>
+</gpx>

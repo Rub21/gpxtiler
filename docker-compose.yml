@@ -1,0 +1,49 @@
+services:
+  db:
+    image: postgis/postgis:17-3.5
+    platform: linux/amd64
+    environment:
+      POSTGRES_USER: gpxtiler
+      POSTGRES_PASSWORD: gpxtiler
+      POSTGRES_DB: gpxtiler
+    ports:
+      - "54329:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gpxtiler"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  test:
+    image: golang:1.24-bookworm
+    working_dir: /src
+    volumes:
+      - .:/src
+      - go-mod:/go/pkg/mod
+      - go-build:/root/.cache/go-build
+    environment:
+      GPXTILER_TEST_DB: postgres://gpxtiler:gpxtiler@db:5432/gpxtiler
+    command: go test ./...
+    depends_on:
+      db:
+        condition: service_healthy
+    profiles: ["tools"]
+
+  gpxtiler:
+    build: .
+    environment:
+      GPXTILER_DB: postgres://gpxtiler:gpxtiler@db:5432/gpxtiler
+      GPXTILER_EXPIRE_DIR: /data/expire
+    volumes:
+      - ./data:/data
+    depends_on:
+      db:
+        condition: service_healthy
+    profiles: ["tools"]
+
+volumes:
+  db-data:
+  go-mod:
+  go-build:
