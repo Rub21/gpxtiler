@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -187,11 +188,49 @@ func TestImportSync(t *testing.T) {
 		t.Errorf("older dump: err = %v", err)
 	}
 
+	// An empty dump is an error.
+	if _, err := Run(ctx, conn, dump("2013-08-09T00:00:00Z", ""), cfg); err == nil || !strings.Contains(err.Error(), "no traces") {
+		t.Errorf("empty dump: err = %v", err)
+	}
+
 	// A dump that would delete most traces stops before deleting.
-	if _, err := Run(ctx, conn, dump("2013-08-09T00:00:00Z", ""), cfg); err == nil || !strings.Contains(err.Error(), "would delete") {
+	only10 := `<trk><osm:id>10</osm:id><trkseg><trkpt lat="10" lon="179.5"/><trkpt lat="10" lon="-179.5"/></trkseg></trk>`
+	if _, err := Run(ctx, conn, dump("2013-08-09T00:00:00Z", only10), cfg); err == nil || !strings.Contains(err.Error(), "would delete") {
 		t.Errorf("mass delete: err = %v", err)
 	}
 	if n := count(t, conn, "SELECT count(*) FROM traces"); n != 5 {
 		t.Errorf("traces after refused run = %d", n)
+	}
+}
+
+// A new dump does not delete traces with a higher id than the dump: they
+// came from update -rss after the dump was made.
+func TestImportKeepsNewerTraces(t *testing.T) {
+	conn := testConn(t)
+	ctx := context.Background()
+	cfg := testConfig(t.TempDir())
+	body := ` <trk><osm:id>%d</osm:id><trkseg><trkpt lat="47.1" lon="9.5"/><trkpt lat="47.2" lon="9.6"/></trkseg></trk>
+`
+	first := ""
+	for _, id := range []int{1, 2, 3, 50} { // 50 came from the RSS
+		first += strings.Replace(body, "%d", strconv.Itoa(id), 1)
+	}
+	if _, err := Run(ctx, conn, dump("2026-10-01T00:00:00Z", first), cfg); err != nil {
+		t.Fatal(err)
+	}
+	// New dump up to id 10: trace 2 was deleted, 10 is new.
+	second := ""
+	for _, id := range []int{1, 3, 10} {
+		second += strings.Replace(body, "%d", strconv.Itoa(id), 1)
+	}
+	st, err := Run(ctx, conn, dump("2026-11-01T00:00:00Z", second), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Deleted != 1 || st.Inserted != 1 {
+		t.Fatalf("stats %+v", st)
+	}
+	if n := count(t, conn, "SELECT count(*) FROM traces WHERE gpx_id IN (1, 3, 10, 50)"); n != 4 {
+		t.Errorf("%d of 1, 3, 10, 50 left, want 4", n)
 	}
 }

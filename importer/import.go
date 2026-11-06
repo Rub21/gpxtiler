@@ -3,7 +3,9 @@
 // Each run syncs the database with the dump:
 //   - new id: insert the trace and its geometry
 //   - known id: update name, description and tags (geometry never changes)
-//   - id not in the dump: the trace was deleted or made private, delete it
+//   - id not in the dump: the trace was deleted or is no longer
+//     identifiable, delete it. Ids higher than the highest id in the dump
+//     are kept, because they are newer than the dump.
 package importer
 
 import (
@@ -108,6 +110,7 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 	skipGeom := func(id int64) bool { _, ok := ids[id]; return ok }
 	b := &batch{}
 	total := 0
+	var dumpMax int64 // highest trace id in the dump
 	for {
 		t, err := rd.Next(skipGeom)
 		if err == io.EOF {
@@ -117,6 +120,7 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 			return st, fmt.Errorf("reading dump: %w", err)
 		}
 		total++
+		dumpMax = max(dumpMax, t.ID)
 		seen, known := ids[t.ID]
 		switch {
 		case seen:
@@ -143,9 +147,15 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 		return st, err
 	}
 
+	if total == 0 && existing > 0 {
+		return st, errors.New("the dump has no traces; check the dump")
+	}
+
+	// Ids higher than the highest id in the dump are kept: they are newer
+	// than the dump and came from "update -rss" or "update -ids".
 	var gone []int64
 	for id, seen := range ids {
-		if !seen {
+		if !seen && id <= dumpMax {
 			gone = append(gone, id)
 		}
 	}
