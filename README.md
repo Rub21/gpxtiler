@@ -7,7 +7,7 @@ and will serve the GPS traces tiles.
 gpxtiler import gpx-latest.gpx.bz2   # each time there is a new dump
 gpxtiler update -rss                 # timer, every few minutes: new traces
 gpxtiler update -ids LIST            # timer, daily: deleted traces
-gpxtiler serve                       # not ready yet
+gpxtiler serve                       # PNG tiles on /lines/{z}/{x}/{y}.png
 gpxtiler render                      # not ready yet
 ```
 
@@ -87,9 +87,35 @@ than `-max-delete-ratio` (50 %) of the traces, or if the list has a bad
 line. Missing traces over `-max-traces` or `-max-time` wait for the next
 run.
 
+## serve
+
+`serve` draws the PNG tiles on the fly from PostGIS, on the same URL as
+gps-tile.openstreetmap.org: `/lines/{z}/{x}/{y}.png` (also without
+`.png`), 256 px, with `Access-Control-Allow-Origin: *`, so JOSM and iD keep
+working.
+
+The drawing is a port of datamaps (Eric Fischer, BSD license), with the
+options of the current tiles:
+
+- each edge adds brightness to the pixels it goes through (antialiased)
+- the color is the mean direction of travel in the pixel; lines in many
+  directions make it gray
+- gamma 0.5, so each extra trace adds less, and a color cap of 0.7
+- long edges (GPS jumps) are dimmer, like datamaps `-g`: over about 15 m at
+  zoom 16, x1.5 for each zoom out
+
+Zooms up to `-low-zoom` (8) read `trace_segments_low`. Tiles below
+`-min-live-zoom` (6) are too big to draw on the fly at planet size; they
+are read from `-tile-dir`, written by `render` (not ready yet), or empty.
+
+`serve` uses its own read-only connection pool and does not take the lock,
+so `import` and `update` keep running. `-max-renders` limits the tiles
+drawn at the same time, `-timeout` stops a slow tile, and `-max-age` sets
+`Cache-Control` (1h). `/health` checks the database.
+
 ## Lock
 
-`import` and `update` take a PostgreSQL advisory lock, so only one runs at
+`import` and `update` (not `serve`) take a PostgreSQL advisory lock, so only one runs at
 a time. If `update` finds the lock taken, it exits without error.
 
 ## Development with Docker
