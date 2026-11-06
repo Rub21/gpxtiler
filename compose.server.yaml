@@ -1,0 +1,61 @@
+# Run gpxtiler on a server: PostGIS and the two updates. The tile server
+# is not here yet.
+#
+#   cp .env.example .env        # set the URLs and the password
+#   docker compose -f compose.server.yaml up -d db
+#   docker compose -f compose.server.yaml run --rm import   # once
+#   docker compose -f compose.server.yaml up -d
+#   docker compose -f compose.server.yaml logs -f update-rss update-ids
+x-gpxtiler: &gpxtiler
+  build: .
+  image: gpxtiler
+  restart: unless-stopped
+  environment:
+    GPXTILER_DB: postgres://gpxtiler:${POSTGRES_PASSWORD:-gpxtiler}@db:5432/gpxtiler
+    GPXTILER_SITE: ${GPXTILER_SITE:-https://www.openstreetmap.org}
+    GPXTILER_EXPIRE_DIR: /data/expire
+    GPXTILER_DUMP: ${GPXTILER_DUMP:-}
+    GPXTILER_IDS: ${GPXTILER_IDS:-}
+    GPXTILER_RSS_EVERY: ${GPXTILER_RSS_EVERY:-300}
+    GPXTILER_IDS_EVERY: ${GPXTILER_IDS_EVERY:-86400}
+  volumes:
+    - ./data:/data
+  depends_on:
+    db:
+      condition: service_healthy
+
+services:
+  db:
+    image: postgis/postgis:17-3.5
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gpxtiler
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gpxtiler}
+      POSTGRES_DB: gpxtiler
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gpxtiler"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  # Load the dump once: docker compose -f compose.server.yaml run --rm import
+  import:
+    <<: *gpxtiler
+    restart: "no"
+    entrypoint: ["sh", "-c", "gpxtiler import \"$$GPXTILER_DUMP\""]
+    profiles: ["import"]
+
+  # New traces from the RSS feed, every few minutes.
+  update-rss:
+    <<: *gpxtiler
+    entrypoint: ["sh", "-c", "while true; do gpxtiler update -rss; sleep $$GPXTILER_RSS_EVERY; done"]
+
+  # Deleted traces from the id list, once a day.
+  update-ids:
+    <<: *gpxtiler
+    entrypoint: ["sh", "-c", "while true; do gpxtiler update -ids \"$$GPXTILER_IDS\"; sleep $$GPXTILER_IDS_EVERY; done"]
+
+volumes:
+  db-data:

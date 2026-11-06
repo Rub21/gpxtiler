@@ -3,6 +3,7 @@ package importer
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -16,13 +17,25 @@ var ErrLocked = errors.New("another gpxtiler import or update is running")
 // Lock takes the advisory lock for this connection. Only one import or
 // update runs at a time, so they never write the same traces or rename
 // each other's expire files. The lock ends when the connection closes.
-func Lock(ctx context.Context, conn *pgx.Conn) error {
-	var ok bool
-	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", int64(lockKey)).Scan(&ok); err != nil {
-		return err
+// When another run has the lock, Lock tries again every few seconds for up
+// to wait, then returns ErrLocked.
+func Lock(ctx context.Context, conn *pgx.Conn, wait time.Duration) error {
+	deadline := time.Now().Add(wait)
+	for {
+		var ok bool
+		if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", int64(lockKey)).Scan(&ok); err != nil {
+			return err
+		}
+		if ok {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return ErrLocked
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(min(5*time.Second, time.Until(deadline))):
+		}
 	}
-	if !ok {
-		return ErrLocked
-	}
-	return nil
 }

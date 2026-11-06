@@ -64,8 +64,12 @@ func commonFlags(fs *flag.FlagSet, cfg *importer.Config) *string {
 	fs.IntVar(&cfg.LowZoom, "low-zoom", cfg.LowZoom, "zoom used to simplify trace_segments_low")
 	fs.StringVar(&cfg.ExpireDir, "expire-dir", envOr("GPXTILER_EXPIRE_DIR", ""), "folder for expire files, empty to disable (env GPXTILER_EXPIRE_DIR)")
 	fs.IntVar(&cfg.ExpireZoom, "expire-zoom", cfg.ExpireZoom, "zoom of the tiles in the expire files")
+	fs.DurationVar(&lockWait, "lock-wait", lockWait, "when another import or update is running, wait this long for it")
 	return db
 }
+
+// lockWait is how long import and update wait for another run to finish.
+var lockWait = 30 * time.Minute
 
 // connect opens the database, creates the tables and takes the lock.
 func connect(ctx context.Context, dsn string) (*pgx.Conn, error) {
@@ -77,7 +81,7 @@ func connect(ctx context.Context, dsn string) (*pgx.Conn, error) {
 		conn.Close(context.Background())
 		return nil, fmt.Errorf("schema: %w", err)
 	}
-	if err := importer.Lock(ctx, conn); err != nil {
+	if err := importer.Lock(ctx, conn, lockWait); err != nil {
 		conn.Close(context.Background())
 		return nil, err
 	}
@@ -121,8 +125,8 @@ func runUpdate(args []string) error {
 	defer stop()
 	conn, err := connect(ctx, *db)
 	if errors.Is(err, importer.ErrLocked) {
-		// A dump import is running. Not an error: the next timer run goes on.
-		log.Print(err)
+		// A long import is running. Not an error: the next run goes on.
+		log.Printf("%v after %s, skipping this run", err, lockWait)
 		return nil
 	}
 	if err != nil {
