@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -24,7 +25,7 @@ import (
 )
 
 const usage = `usage:
-  gpxtiler import [flags] FILE   load a GPX dump (.gpx, .gpx.bz2, .gpx.gz, or - for stdin)
+  gpxtiler import [flags] FILE   load a GPX dump (.gpx, .gpx.bz2, .gpx.gz, an http(s) URL, or - for stdin)
   gpxtiler update -rss [flags]   load new traces from the website RSS feed
   gpxtiler serve                 serve tiles (not ready yet)
   gpxtiler render                render low zoom tiles (not ready yet)
@@ -160,13 +161,27 @@ func runImport(args []string) error {
 	return nil
 }
 
+// openInput opens a local file, an http(s) URL or stdin ("-"), and
+// unpacks it by the name: .bz2 or .gz.
 func openInput(name string) (io.Reader, func(), error) {
-	f := os.Stdin
-	if name != "-" {
-		var err error
-		if f, err = os.Open(name); err != nil {
+	var f io.ReadCloser = os.Stdin
+	switch {
+	case strings.HasPrefix(name, "http://") || strings.HasPrefix(name, "https://"):
+		resp, err := http.Get(name)
+		if err != nil {
 			return nil, nil, err
 		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, nil, fmt.Errorf("GET %s: %s", name, resp.Status)
+		}
+		f = resp.Body
+	case name != "-":
+		file, err := os.Open(name)
+		if err != nil {
+			return nil, nil, err
+		}
+		f = file
 	}
 	closeFn := func() { f.Close() }
 	r := bufio.NewReaderSize(f, 1<<20)

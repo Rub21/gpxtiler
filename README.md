@@ -31,6 +31,12 @@ For big files, use lbzip2, it is much faster than Go's bzip2:
 lbzip2 -dc gpx-latest.gpx.bz2 | gpxtiler import -
 ```
 
+`import` also reads from a URL:
+
+```
+gpxtiler import https://planet-gpx-tracks.rub21.com/gps/gpx-latest.gpx.bz2
+```
+
 Run `gpxtiler import -h` to see all the flags.
 
 ## update -rss
