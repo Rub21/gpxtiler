@@ -27,6 +27,7 @@ import (
 const usage = `usage:
   gpxtiler import [flags] FILE   load a GPX dump (.gpx, .gpx.bz2, .gpx.gz, an http(s) URL, or - for stdin)
   gpxtiler update -rss [flags]   load new traces from the website RSS feed
+  gpxtiler update -ids LIST      delete traces that are not in the id list, load the missing ones
   gpxtiler serve                 serve tiles (not ready yet)
   gpxtiler render                render low zoom tiles (not ready yet)
 
@@ -90,14 +91,30 @@ func runUpdate(args []string) error {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 	db := commonFlags(fs, &cfg)
 	rss := fs.Bool("rss", false, "load new traces from the RSS feed of the website")
+	ids := fs.String("ids", "", "sync with this list of identifiable trace ids (file or http(s) URL)")
 	site := fs.String("site", envOr("GPXTILER_SITE", "https://www.openstreetmap.org"), "website to read the traces from (env GPXTILER_SITE)")
 	delay := fs.Duration("delay", 500*time.Millisecond, "pause between requests to the website")
-	fs.IntVar(&rc.MaxTraces, "max-traces", rc.MaxTraces, "check at most this many trace ids per run")
+	fs.IntVar(&rc.MaxTraces, "max-traces", rc.MaxTraces, "download or check at most this many traces per run")
 	fs.DurationVar(&rc.MaxTime, "max-time", rc.MaxTime, "stop the run after this time")
-	fs.Int64Var(&rc.StartID, "start-id", 0, "first run only: start after this trace id (default: highest id in the database)")
+	fs.Int64Var(&rc.StartID, "start-id", 0, "-rss, first run only: start after this trace id (default: highest id in the database)")
+	fs.Float64Var(&cfg.MaxDeleteRatio, "max-delete-ratio", cfg.MaxDeleteRatio, "-ids: stop if more than this share of traces would be deleted, 0 to disable")
 	fs.Parse(args)
-	if !*rss || fs.NArg() != 0 {
-		return fmt.Errorf("update needs -rss\n\n%s", usage)
+	if *rss == (*ids != "") || fs.NArg() != 0 {
+		return fmt.Errorf("update needs -rss or -ids LIST\n\n%s", usage)
+	}
+
+	// Read the list before taking the lock: it can be a big download.
+	var list []int64
+	if *ids != "" {
+		in, closeIn, err := openInput(*ids)
+		if err != nil {
+			return err
+		}
+		list, err = importer.ReadIDList(in)
+		closeIn()
+		if err != nil {
+			return err
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -116,6 +133,16 @@ func runUpdate(args []string) error {
 	f := importer.NewFetcher(*site)
 	f.Delay = *delay
 	start := time.Now()
+
+	if *ids != "" {
+		ic := importer.IDsConfig{MaxTraces: rc.MaxTraces, MaxTime: rc.MaxTime}
+		st, err := importer.RunIDs(ctx, conn, f, list, cfg, ic)
+		log.Printf("done in %s: %d deleted, %d new, %d skipped, %d left for the next run, %d segments, %d expired tiles %s",
+			time.Since(start).Round(time.Second), st.Deleted, st.Inserted, st.Skipped, st.Left,
+			st.Segments, st.ExpireTiles, st.ExpireFile)
+		return err
+	}
+
 	st, err := importer.RunRSS(ctx, conn, f, cfg, rc)
 	if st.Checked == 0 {
 		return err
