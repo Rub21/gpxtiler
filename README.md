@@ -5,6 +5,7 @@ and will serve the GPS traces tiles.
 
 ```
 gpxtiler import gpx-latest.gpx.bz2   # each time there is a new dump
+gpxtiler update -rss                 # timer, every few minutes: new traces
 gpxtiler serve                       # not ready yet
 gpxtiler render                      # not ready yet
 ```
@@ -31,6 +32,30 @@ lbzip2 -dc gpx-latest.gpx.bz2 | gpxtiler import -
 ```
 
 Run `gpxtiler import -h` to see all the flags.
+
+## update -rss
+
+`update -rss` loads new traces between two dumps, like gpx-updater does
+today:
+
+1. read `/traces/rss` on the website to get the highest trace id
+2. check every id after the last one checked, up to that id
+3. download `/traces/:id/data.gpx` and insert the trace; the website
+   answers 404 for traces that are deleted or not public, and unpacks
+   gz, bz2, zip and tar uploads
+
+It only inserts. Deleted traces are removed by the next `import`. The RSS
+mode has no name, description or tags, because the website only gives
+them through the API with a login; the next dump adds them.
+
+The last checked id is kept in `rss_state`. On the first run it starts
+after the highest id in the database, or after `-start-id`. A server
+error stops the run, and the next run tries the same id again. Each run
+checks at most `-max-traces` ids (1000) for at most `-max-time` (10m),
+with `-delay` (500ms) between requests.
+
+`import` and `update` take a PostgreSQL advisory lock, so only one runs at
+a time. If `update` finds the lock taken, it exits without error.
 
 ## Development with Docker
 

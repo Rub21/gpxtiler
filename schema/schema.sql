@@ -40,3 +40,9 @@ CREATE TABLE IF NOT EXISTS dump_state (
 
 CREATE INDEX IF NOT EXISTS trace_segments_geom_idx ON trace_segments USING gist (geom);
 CREATE INDEX IF NOT EXISTS trace_segments_low_geom_idx ON trace_segments_low USING gist (geom);
+
+-- Only one row: the last trace id checked by "update --rss".
+CREATE TABLE IF NOT EXISTS rss_state (
+    id      boolean PRIMARY KEY DEFAULT true CHECK (id),
+    last_id bigint NOT NULL
+);
