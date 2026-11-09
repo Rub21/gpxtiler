@@ -14,24 +14,27 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Rub21/gpxtiler/importer"
 	"github.com/Rub21/gpxtiler/schema"
+	"github.com/Rub21/gpxtiler/tiles"
 )
 
 const usage = `usage:
   gpxtiler import [flags] FILE   load a GPX dump (.gpx, .gpx.bz2, .gpx.gz, an http(s) URL, or - for stdin)
   gpxtiler update -rss [flags]   load new traces from the website RSS feed
   gpxtiler update -ids LIST      delete traces that are not in the id list, load the missing ones
-  gpxtiler serve                 serve tiles (not ready yet)
+  gpxtiler serve [flags]         serve the PNG tiles on /lines/{z}/{x}/{y}.png
   gpxtiler render                render low zoom tiles (not ready yet)
 
-Run "gpxtiler import -h" or "gpxtiler update -h" to see the flags.`
+Run "gpxtiler import -h", "gpxtiler update -h" or "gpxtiler serve -h" to see the flags.`
 
 func main() {
 	if len(os.Args) < 2 {
@@ -44,7 +47,9 @@ func main() {
 		err = runImport(os.Args[2:])
 	case "update":
 		err = runUpdate(os.Args[2:])
-	case "serve", "render":
+	case "serve":
+		err = runServe(os.Args[2:])
+	case "render":
 		err = fmt.Errorf("%s is not ready yet", os.Args[1])
 	default:
 		fmt.Fprintln(os.Stderr, usage)
@@ -155,6 +160,61 @@ func runUpdate(args []string) error {
 		time.Since(start).Round(time.Second), st.FromID, st.ToID, st.Checked, st.Inserted, st.Skipped,
 		st.Segments, st.ExpireTiles, st.ExpireFile)
 	return err
+}
+
+func runServe(args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	db := fs.String("db", envOr("GPXTILER_DB", "postgres://localhost/gpxtiler"), "PostgreSQL connection string (env GPXTILER_DB)")
+	listen := fs.String("listen", envOr("GPXTILER_LISTEN", ":8080"), "address to listen on (env GPXTILER_LISTEN)")
+	lowZoom := fs.Int("low-zoom", importer.DefaultConfig().LowZoom, "zooms up to this one read trace_segments_low (same as import -low-zoom)")
+	minLive := fs.Int("min-live-zoom", 6, "tiles below this zoom are read from -tile-dir, not drawn on the fly")
+	maxZoom := fs.Int("max-zoom", 20, "highest zoom")
+	tileDir := fs.String("tile-dir", envOr("GPXTILER_TILE_DIR", ""), "folder with the low zoom tiles from render (env GPXTILER_TILE_DIR)")
+	maxRenders := fs.Int("max-renders", runtime.NumCPU(), "tiles drawn at the same time")
+	maxAge := fs.Duration("max-age", time.Hour, "Cache-Control max-age of the tiles")
+	timeout := fs.Duration("timeout", 30*time.Second, "stop drawing a tile after this time")
+	fs.Parse(args)
+	if fs.NArg() != 0 {
+		return fmt.Errorf("serve takes no arguments\n\n%s", usage)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	// A pool, not connect(): serve runs all the time and must not take the
+	// import/update lock. It only reads.
+	pcfg, err := pgxpool.ParseConfig(*db)
+	if err != nil {
+		return err
+	}
+	pcfg.MaxConns = int32(*maxRenders + 2)
+	pcfg.ConnConfig.RuntimeParams["default_transaction_read_only"] = "on"
+	pool, err := pgxpool.NewWithConfig(ctx, pcfg)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	srv := &tiles.Server{
+		Renderer:    &tiles.Renderer{Pool: pool, LowZoom: *lowZoom},
+		MinLiveZoom: *minLive,
+		MaxZoom:     *maxZoom,
+		TileDir:     *tileDir,
+		MaxAge:      *maxAge,
+		Timeout:     *timeout,
+		Log:         log.Default(),
+	}
+	hs := &http.Server{Addr: *listen, Handler: srv.Handler(*maxRenders), ReadHeaderTimeout: 10 * time.Second}
+	go func() {
+		<-ctx.Done()
+		shut, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		hs.Shutdown(shut)
+	}()
+	log.Printf("serving tiles on %s", *listen)
+	if err := hs.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }
 
 func runImport(args []string) error {
