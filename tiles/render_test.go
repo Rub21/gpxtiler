@@ -176,6 +176,12 @@ func TestServer(t *testing.T) {
 			t.Errorf("%s: %d, want 404", bad, resp.StatusCode)
 		}
 	}
+	if resp, body := get("/"); resp.StatusCode != 200 || !bytes.Contains(body, []byte("lines/{z}/{x}/{y}.png")) {
+		t.Errorf("viewer: %d", resp.StatusCode)
+	}
+	if resp, _ := get("/nothing"); resp.StatusCode != 404 {
+		t.Errorf("unknown path: %d, want 404", resp.StatusCode)
+	}
 	if resp, _ := get("/health"); resp.StatusCode != 200 {
 		t.Errorf("health: %d", resp.StatusCode)
 	}

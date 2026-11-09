@@ -3,6 +3,7 @@ package tiles
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"image"
@@ -15,6 +16,9 @@ import (
 	"strings"
 	"time"
 )
+
+//go:embed viewer.html
+var viewerHTML []byte
 
 // Server serves the PNG tiles on /lines/{z}/{x}/{y}.png, the same URL as
 // gps-tile.openstreetmap.org, so JOSM and iD keep working.
@@ -43,6 +47,11 @@ func (s *Server) Handler(maxRenders int) http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /lines/{z}/{x}/{y}", s.tile)
+	// A small map to look at the tiles.
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(viewerHTML)
+	})
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		if err := s.Renderer.Pool.Ping(r.Context()); err != nil {
 			http.Error(w, "database: "+err.Error(), http.StatusServiceUnavailable)

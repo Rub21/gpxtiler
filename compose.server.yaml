@@ -1,11 +1,12 @@
-# Run gpxtiler on a server: PostGIS and the two updates. The tile server
-# is not here yet.
+# Run gpxtiler on a server: PostGIS, the two updates and the tile server.
 #
 #   cp .env.example .env        # set the URLs and the password
 #   docker compose -f compose.server.yaml up -d db
 #   docker compose -f compose.server.yaml run --rm import   # once
 #   docker compose -f compose.server.yaml up -d
 #   docker compose -f compose.server.yaml logs -f update-rss update-ids
+#
+# Tiles: http://localhost:${GPXTILER_PORT:-8080}/lines/{z}/{x}/{y}.png
 name: gpxtiler-server
 x-gpxtiler: &gpxtiler
   build: .
@@ -15,6 +16,7 @@ x-gpxtiler: &gpxtiler
     GPXTILER_DB: postgres://gpxtiler:${POSTGRES_PASSWORD:-gpxtiler}@db:5432/gpxtiler
     GPXTILER_SITE: ${GPXTILER_SITE:-https://www.openstreetmap.org}
     GPXTILER_EXPIRE_DIR: /data/expire
+    GPXTILER_TILE_DIR: /data/tiles
     GPXTILER_DUMP: ${GPXTILER_DUMP:-}
     GPXTILER_IDS: ${GPXTILER_IDS:-}
     GPXTILER_RSS_EVERY: ${GPXTILER_RSS_EVERY:-300}
@@ -47,6 +49,15 @@ services:
     restart: "no"
     entrypoint: ["sh", "-c", "gpxtiler import \"$$GPXTILER_DUMP\""]
     profiles: ["import"]
+
+  # PNG tiles on /lines/{z}/{x}/{y}.png. Only reads the database.
+  serve:
+    <<: *gpxtiler
+    # -min-live-zoom 0: draw all zooms on the fly. Fine for test data; with
+    # the full planet, low zooms will come from disk once "render" exists.
+    command: ["serve", "-listen", ":8080", "-min-live-zoom", "0"]
+    ports:
+      - "${GPXTILER_PORT:-8080}:8080"
 
   # New traces from the RSS feed, every few minutes.
   update-rss:

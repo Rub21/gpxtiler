@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gpxtiler</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<style>
+  html, body, #map { height: 100%; margin: 0; }
+  body { background: #000; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script>
+// Viewer for the PNG tiles of this server, over OSM Carto at 20 % opacity.
+// The position is kept in the URL hash (#zoom/lat/lon).
+const tiles = new URL("lines/{z}/{x}/{y}.png", location.href).href.replace(/%7B/g, "{").replace(/%7D/g, "}");
+
+const map = new maplibregl.Map({
+  container: "map",
+  hash: true,
+  center: [0, 30],
+  zoom: 3,
+  maxZoom: 20,
+  style: {
+    version: 8,
+    sources: {
+      osm: {
+        type: "raster", tileSize: 256, maxzoom: 19,
+        tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+        attribution: "&copy; OpenStreetMap contributors",
+      },
+      traces: {
+        type: "raster", tileSize: 256, maxzoom: 20,
+        tiles: [tiles],
+        attribution: "GPS traces",
+      },
+    },
+    layers: [
+      { id: "background", type: "background", paint: { "background-color": "#000" } },
+      { id: "osm", type: "raster", source: "osm", paint: { "raster-opacity": 0.2 } },
+      { id: "traces", type: "raster", source: "traces" },
+    ],
+  },
+});
+map.addControl(new maplibregl.NavigationControl(), "top-right");
+</script>
+</body>
+</html>
