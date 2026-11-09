@@ -6,6 +6,7 @@
 #   docker compose -f compose.server.yaml run --rm import   # once
 #   docker compose -f compose.server.yaml up -d
 #   docker compose -f compose.server.yaml logs -f update-rss update-ids
+name: gpxtiler-server
 x-gpxtiler: &gpxtiler
   build: .
   image: gpxtiler
