@@ -29,8 +29,8 @@ Run `gpxtiler <command> -h` to see the flags.
   [datamaps](https://github.com/ericfischer/datamaps), so the tiles look like
   gps-tile.openstreetmap.org: colors by direction, GPS jumps dimmed.
   `/` is a small map to look at them.
-- `render` keeps the tiles on disk, like ops does with Tilekiln on
-  vector.openstreetmap.org.
+- `render` keeps the low zoom tiles on disk, like ops does with Tilekiln
+  on vector.openstreetmap.org.
 
 Tiles by zoom (the numbers are flags):
 
@@ -46,24 +46,10 @@ them every few minutes: it redraws the expired pre-rendered tiles from
 zoom 6 up and drops the expired cached tiles. Tilekiln can read the same
 files with `tilekiln generate tiles`.
 
-## Vector tiles with Tilekiln
-
-[Tilekiln](https://github.com/pnorman/tilekiln) is the vector tile server
-ops runs on vector.openstreetmap.org. The `tilekiln/` folder has its config
-and the SQL of the `traces` layer: lines cut by direction of travel
-(`dir`, 32 steps) with a `fade` value for GPS jumps, read from the same
-tables. `compose.server.yaml` runs it with `serve dev`, drawing on the fly.
-The TileJSON is on `/gps/tilejson.json`.
-
-## Run on a server
-
-```
-cp .env.example .env        # set the password and the URLs
-docker compose -f compose.server.yaml up -d db
-docker compose -f compose.server.yaml run --rm import       # once
-docker compose -f compose.server.yaml run --rm render-all   # once
-docker compose -f compose.server.yaml up -d                 # serve, updates, render
-```
+Vector tiles from the same tables:
+[gpx-vector-tiles](https://github.com/Rub21/gpx-vector-tiles) (Tilekiln
+config). To run everything with Docker on a server:
+[gpx-tiles-stack](https://github.com/Rub21/gpx-tiles-stack).
 
 ## Development
 
