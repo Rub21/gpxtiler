@@ -169,6 +169,7 @@ func runServe(args []string) error {
 	lowZoom := fs.Int("low-zoom", importer.DefaultConfig().LowZoom, "zooms up to this one read trace_segments_low (same as import -low-zoom)")
 	minLive := fs.Int("min-live-zoom", 6, "tiles below this zoom are read from -tile-dir, not drawn on the fly")
 	maxZoom := fs.Int("max-zoom", 20, "highest zoom")
+	colors := fs.Int("colors", 64, "colors per PNG, like pngquant on the current tiles; 0 for full color")
 	tileDir := fs.String("tile-dir", envOr("GPXTILER_TILE_DIR", ""), "folder with the low zoom tiles from render (env GPXTILER_TILE_DIR)")
 	maxRenders := fs.Int("max-renders", runtime.NumCPU(), "tiles drawn at the same time")
 	maxAge := fs.Duration("max-age", time.Hour, "Cache-Control max-age of the tiles")
@@ -195,7 +196,7 @@ func runServe(args []string) error {
 	defer pool.Close()
 
 	srv := &tiles.Server{
-		Renderer:    &tiles.Renderer{Pool: pool, LowZoom: *lowZoom},
+		Renderer:    &tiles.Renderer{Pool: pool, LowZoom: *lowZoom, Colors: *colors},
 		MinLiveZoom: *minLive,
 		MaxZoom:     *maxZoom,
 		TileDir:     *tileDir,

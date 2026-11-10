@@ -3,9 +3,13 @@ package tiles
 import (
 	"bytes"
 	"context"
+	"image"
+	"image/color"
+	"image/draw"
 	"image/png"
 	"math"
 
+	"github.com/ericpauley/go-quantize/quantize"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -45,6 +49,10 @@ type Renderer struct {
 	// LowZoom: zooms up to this one read trace_segments_low, which is
 	// simplified to one pixel at that zoom. The same value as import -low-zoom.
 	LowZoom int
+	// Colors: reduce each PNG to this many colors, like pngquant does for
+	// the current tiles (64). The file gets about 4 times smaller. 0 keeps
+	// full color.
+	Colors int
 }
 
 // tileBounds returns the Web Mercator bounds of a tile.
@@ -59,12 +67,25 @@ func (r *Renderer) Render(ctx context.Context, z, x, y int) ([]byte, error) {
 	if err != nil || c.Empty() {
 		return nil, err
 	}
+	var img image.Image = c.Image()
+	if r.Colors > 0 {
+		img = quantizeImage(img, r.Colors)
+	}
 	var buf bytes.Buffer
-	enc := png.Encoder{CompressionLevel: png.BestSpeed}
-	if err := enc.Encode(&buf, c.Image()); err != nil {
+	if err := png.Encode(&buf, img); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// quantizeImage reduces the image to n colors (median cut, no dithering),
+// keeping the transparent background.
+func quantizeImage(img image.Image, n int) *image.Paletted {
+	q := quantize.MedianCutQuantizer{AddTransparent: true}
+	pal := q.Quantize(make(color.Palette, 0, n), img)
+	dst := image.NewPaletted(img.Bounds(), pal)
+	draw.Draw(dst, dst.Bounds(), img, image.Point{}, draw.Src)
+	return dst
 }
 
 // Draw draws one tile on a new canvas.

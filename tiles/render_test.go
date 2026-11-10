@@ -3,6 +3,7 @@ package tiles
 import (
 	"bytes"
 	"context"
+	"image"
 	"image/png"
 	"io"
 	"log"
@@ -80,7 +81,7 @@ const z16x, z16y = 34501, 23013
 
 func TestRender(t *testing.T) {
 	pool := testPool(t)
-	r := &Renderer{Pool: pool, LowZoom: 8}
+	r := &Renderer{Pool: pool, LowZoom: 8, Colors: 64}
 	ctx := context.Background()
 
 	data, err := r.Render(ctx, 16, z16x, z16y)
@@ -93,6 +94,16 @@ func TestRender(t *testing.T) {
 	img, err := png.Decode(bytes.NewReader(data))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if p, ok := img.(*image.Paletted); !ok {
+		t.Errorf("tile is %T, want a paletted PNG", img)
+	} else if len(p.Palette) > 64 {
+		t.Errorf("palette has %d colors, want at most 64", len(p.Palette))
+	}
+	// Full color when Colors is 0.
+	full, err := (&Renderer{Pool: pool, LowZoom: 8}).Render(ctx, 16, z16x, z16y)
+	if err != nil || len(full) <= len(data) {
+		t.Errorf("full color tile: %d bytes, paletted %d bytes, %v", len(full), len(data), err)
 	}
 	// The trace goes east: drawn pixels are red.
 	red := 0

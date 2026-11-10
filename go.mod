@@ -2,7 +2,10 @@ module github.com/Rub21/gpxtiler
 
 go 1.24
 
-require github.com/jackc/pgx/v5 v5.7.2
+require (
+	github.com/ericpauley/go-quantize v0.0.0-20200331213906-ae555eb2afa4
+	github.com/jackc/pgx/v5 v5.7.2
+)
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
