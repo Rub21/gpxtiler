@@ -1,0 +1,49 @@
+-- Trace lines in the tile, cut into pieces by direction of travel, so the
+-- style can color them like the PNG tiles (datamaps lines-directional).
+--
+-- Low zooms read the simplified copies that import fills (trace_segments_z5,
+-- _z8, _z11: one pixel at that zoom). Vector tiles are drawn sharp and
+-- often at double resolution, so a tile reads the copy made for two zooms
+-- deeper, or the lines look angular.
+{% set table = "trace_segments_z5" if zoom <= 3 else "trace_segments_z8" if zoom <= 6 else "trace_segments_z11" if zoom <= 9 else "trace_segments" %}
+{% set low = zoom <= 9 %}
+WITH clipped AS (
+  SELECT gpx_id, ST_AsMVTGeom(geom, {{bbox}}, {{extent}}, {{buffer}}, true) AS g
+  FROM {{table}}
+  WHERE geom && {{bbox}}
+),
+edges AS (
+  -- Simplify to a quarter of a pixel (4 of 4096 tile units) before
+  -- cutting, so a tile does not carry many tiny pieces.
+  SELECT gpx_id, (ST_DumpSegments(ST_Simplify(g, 4))).geom AS g
+  FROM clipped
+  WHERE g IS NOT NULL AND GeometryType(g) IN ('LINESTRING', 'MULTILINESTRING')
+),
+dirs AS (
+  -- dir: direction of travel in 32 steps. Tile y grows down, so north is
+  -- start y - end y.
+  -- fade 1-10: like datamaps -g and gpxtiler serve, an edge longer than
+  -- about 15 m at z16 (x1.5 for each zoom out) gets dimmer: the brightness
+  -- is divided by (length / limit), and the PNG uses gamma 0.5, so the
+  -- opacity is sqrt(limit / length). Edges over 200 times the limit are
+  -- dropped. The limit in tile units is 1600 world units (2^32 per world)
+  -- * 1.5^(16 - z) * 2^(z - 20). The simplified copies are already cut at
+  -- the GPS jumps and their long edges come from the simplification, so
+  -- nothing is dimmed there.
+  SELECT gpx_id, g,
+{% if low %}
+         10 AS fade,
+{% else %}
+         least(10, greatest(1, round(10 * sqrt(least(1.0, 1600 * power(1.5, 16 - {{zoom}}) * power(2, {{zoom}} - 20) / ST_Length(g))))))::int AS fade,
+{% endif %}
+         floor((degrees(atan2(ST_Y(ST_StartPoint(g)) - ST_Y(ST_EndPoint(g)),
+                              ST_X(ST_EndPoint(g)) - ST_X(ST_StartPoint(g)))) + 360) / 11.25)::int % 32 AS dir
+  FROM edges
+  WHERE NOT ST_Equals(ST_StartPoint(g), ST_EndPoint(g))
+{% if not low %}
+    AND ST_Length(g) < 200 * 1600 * power(1.5, 16 - {{zoom}}) * power(2, {{zoom}} - 20)
+{% endif %}
+)
+SELECT ST_LineMerge(ST_Collect(g)) AS geom, gpx_id, dir, fade
+FROM dirs
+GROUP BY gpx_id, dir, fade

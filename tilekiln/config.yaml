@@ -1,0 +1,21 @@
+# Tilekiln config for the GPS traces vector tiles.
+# https://github.com/pnorman/tilekiln/blob/main/CONFIGURATION.md
+metadata:
+  id: gps
+  name: OpenStreetMap GPS traces
+  description: GPS traces uploaded to openstreetmap.org, as lines with their direction of travel
+  attribution: "&copy; OpenStreetMap contributors"
+  bounds: [-180, -85.05112877980659, 180, 85.0511287798066]
+  center: [0, 30, 3]
+vector_layers:
+  traces:
+    description: Trace lines, cut where the direction of travel changes
+    fields:
+      gpx_id: Trace id
+      dir: "Direction of travel in 32 steps of 11.25 degrees: 0 = east, 8 = north, 16 = west, 24 = south"
+      fade: "1-10. Long edges (GPS jumps) get a low value, so the style can dim them"
+    sql:
+    - minzoom: 0
+      maxzoom: 20
+      extent: 4096
+      file: traces.sql.jinja2
