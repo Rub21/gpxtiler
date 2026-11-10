@@ -13,9 +13,9 @@ gpxtiler update -rss -site https://www.openstreetmap.org -expire-dir /data/expir
 # daily: sync with the list of identifiable trace ids (delete, download the missing ones)
 gpxtiler update -ids https://planet.openstreetmap.org/gps/gpx_ids/identifiable.txt -site https://www.openstreetmap.org -expire-dir /data/expire
 
-# PNG tiles on /lines/{z}/{x}/{y}.png. A tile is read from -tile-dir, or drawn
-# and kept there (up to zoom 14) for the next request
-gpxtiler serve -tile-dir /data/tiles
+# PNG tiles on /lines/{z}/{x}/{y}.png. A tile is read from -tile-dir, or drawn and
+# kept there for the next request. Above -cache-zoom it is drawn on every request
+gpxtiler serve -tile-dir /data/tiles -cache-zoom 14
 
 # once before opening, and daily: draw all the tiles of zoom 0 to 9 to disk
 gpxtiler render -zooms 0-9 -tile-dir /data/tiles
@@ -29,7 +29,7 @@ gpxtiler render -expired -zooms 6-9 -expire-dir /data/expire -tile-dir /data/til
 
 ## How it works
 
-- `import` reads the GPX dump from [planet-dump-ng](https://github.com/zerebubuth/planet-dump-ng) (file, URL or `-` for stdin) and stores each trace as lines in PostGIS, plus a simplified copy per low zoom (`-low-zooms 5,8,11`), like Spyglass does.
+- `import` reads the GPX dump from [planet-dump-ng](https://github.com/zerebubuth/planet-dump-ng) (file, URL or `-` for stdin) and stores each trace as lines in PostGIS, plus a simplified copy per low zoom (`-simplified-zooms 5,8,11`), like Spyglass does.
 - `update -rss` reads the website RSS feed and downloads the new traces, like [gpx-updater](https://github.com/openstreetmap/gpx-updater) does today.
 - `update -ids` reads the daily list of identifiable trace ids (openstreetmap/chef#881), deletes the traces that are not in it and downloads the missing ones.
 - `serve` draws the tiles from PostGIS. The drawing is a port of [datamaps](https://github.com/ericfischer/datamaps), so the tiles look like gps-tile.openstreetmap.org: colors by direction, GPS jumps dimmed. `/` is a small map to look at them.
@@ -47,7 +47,22 @@ gpxtiler render -expired -zooms 6-9 -expire-dir /data/expire -tile-dir /data/til
 | 10 to 14 | `serve` on the first request | yes |
 | 15 to 20 | `serve` on every request | no |
 
-**Keeping the tiles up to date.** `import` and `update` write the tiles they touch to expire files (`z/x/y` per line, zooms 0 to 14, the same format as osm2pgsql). Every few minutes `render -expired -zooms 6-9` reads them: it redraws the touched tiles of zoom 6 to 9 and removes the touched ones of zoom 10 to 14 from disk, so `serve` draws them again on the next request. Zoom 0 to 5 wait for the daily `render -zooms 0-5`. Tilekiln can read the same files with `tilekiln generate tiles`.
+## Expire files
+
+When a trace is added or deleted, the tiles that show it are out of date. `import` and `update` write them to `-expire-dir/expire-<time>.txt`, one tile per line:
+
+```
+8/129/87
+9/259/175
+...
+```
+
+It is the format of the osm2pgsql expire files, so the same file works for the PNG tiles and for Tilekiln, like ops does on vector.openstreetmap.org:
+
+- `render -expired -zooms 6-9` redraws the listed tiles of zoom 6 to 9, removes the listed ones of zoom 10 to 14 from disk (`serve` draws them again on the next request) and deletes the file. Zoom 0 to 5 wait for the daily `render -zooms 0-5`.
+- `tilekiln generate tiles --config config.yaml < expire-<time>.txt` regenerates the stored vector tiles (when Tilekiln runs with storage).
+
+The files list zoom 0 to 14 (`-expire-min-zoom`, `-expire-max-zoom`): the zooms that are kept on disk. Above `-cache-zoom` nothing is stored, so nothing needs to expire.
 
 Vector tiles from the same tables: [gpx-vector-tiles](https://github.com/Rub21/gpx-vector-tiles) (Tilekiln config). To run everything with Docker on a server: [gpx-tiles-stack](https://github.com/Rub21/gpx-tiles-stack).
 
