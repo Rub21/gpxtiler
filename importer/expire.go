@@ -11,13 +11,16 @@ import (
 )
 
 // Expire collects the tiles touched by inserted or deleted traces and
-// writes them to a file, one "z/x/y" per line, in one zoom.
+// writes them to a file, one "z/x/y" per line, for every zoom from minZoom
+// to maxZoom. It is the format of the osm2pgsql expire files, which
+// "tilekiln generate tiles" reads from stdin.
 //
 // While import runs the file ends in ".part". At the end it is renamed to
 // ".txt", so render only reads finished files. A nil *Expire does nothing.
 type Expire struct {
-	zoom    int
-	tiles   map[uint64]struct{}
+	minZoom int
+	maxZoom int
+	tiles   map[uint64]struct{} // key: zoom<<58 | x<<29 | y
 	pending []uint64
 	path    string // final path, without ".part"
 	file    *os.File
@@ -25,7 +28,10 @@ type Expire struct {
 
 // NewExpire prepares an expire file in dir. Leftover ".part" files from a
 // run that stopped are renamed to ".txt" first, so their tiles are not lost.
-func NewExpire(dir string, zoom int, runTime time.Time) (*Expire, error) {
+func NewExpire(dir string, minZoom, maxZoom int, runTime time.Time) (*Expire, error) {
+	if minZoom < 0 || maxZoom < minZoom || maxZoom > 28 {
+		return nil, fmt.Errorf("expire zooms %d-%d are out of range", minZoom, maxZoom)
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -40,9 +46,10 @@ func NewExpire(dir string, zoom int, runTime time.Time) (*Expire, error) {
 	}
 	name := "expire-" + runTime.UTC().Format("20060102T150405Z") + ".txt"
 	return &Expire{
-		zoom:  zoom,
-		tiles: map[uint64]struct{}{},
-		path:  filepath.Join(dir, name),
+		minZoom: minZoom,
+		maxZoom: maxZoom,
+		tiles:   map[uint64]struct{}{},
+		path:    filepath.Join(dir, name),
 	}, nil
 }
 
@@ -62,7 +69,7 @@ func (e *Expire) AddLine(pts []XY) {
 // addSegment walks the tile grid from a to b (Amanatides & Woo), so tiles
 // that the line only cuts at a corner are also marked.
 func (e *Expire) addSegment(a, b XY) {
-	n := 1 << e.zoom
+	n := 1 << e.maxZoom
 	size := 2 * mercMax / float64(n)
 	ax, ay := (a[0]+mercMax)/size, (mercMax-a[1])/size
 	bx, by := (b[0]+mercMax)/size, (mercMax-b[1])/size
@@ -96,15 +103,19 @@ func gridStep(start, d float64, cell int) (step int, tMax, tDelta float64) {
 	return 0, math.Inf(1), math.Inf(1)
 }
 
+// addTile marks a tile at maxZoom and the tiles above it down to minZoom.
 func (e *Expire) addTile(x, y, n int) {
 	x = max(0, min(n-1, x))
 	y = max(0, min(n-1, y))
-	k := uint64(x)<<32 | uint64(y)
-	if _, ok := e.tiles[k]; ok {
-		return
+	for z := e.maxZoom; z >= e.minZoom; z-- {
+		k := uint64(z)<<58 | uint64(x)<<29 | uint64(y)
+		if _, ok := e.tiles[k]; ok {
+			return // the tiles above are marked too
+		}
+		e.tiles[k] = struct{}{}
+		e.pending = append(e.pending, k)
+		x, y = x>>1, y>>1
 	}
-	e.tiles[k] = struct{}{}
-	e.pending = append(e.pending, k)
 }
 
 // Flush writes the new tiles to disk. Import calls it before each commit,
@@ -122,7 +133,7 @@ func (e *Expire) Flush() error {
 	}
 	w := bufio.NewWriter(e.file)
 	for _, k := range e.pending {
-		fmt.Fprintf(w, "%d/%d/%d\n", e.zoom, k>>32, k&0xffffffff)
+		fmt.Fprintf(w, "%d/%d/%d\n", k>>58, (k>>29)&(1<<29-1), k&(1<<29-1))
 	}
 	if err := w.Flush(); err != nil {
 		return err
@@ -153,7 +164,7 @@ func (e *Expire) Close() (string, error) {
 	return e.path, os.Rename(e.path+".part", e.path)
 }
 
-// Count returns the number of tiles marked in this run.
+// Count returns the number of tiles marked in this run, in all zooms.
 func (e *Expire) Count() int {
 	if e == nil {
 		return 0

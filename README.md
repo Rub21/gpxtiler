@@ -27,8 +27,10 @@ Run `gpxtiler <command> -h` to see the flags.
   gps-tile.openstreetmap.org: colors by direction, GPS jumps dimmed.
   `/` is a small map to look at them.
 
-`import` and `update` write the changed tiles to expire files, for the
-future `render` step.
+`import` and `update` write the changed tiles to expire files, one `z/x/y`
+per line for zooms 0 to 14 (`-expire-min-zoom`, `-expire-max-zoom`), the
+same format as osm2pgsql. They are for the future `render` step and for
+`tilekiln generate tiles`.
 
 ## Run on a server
 

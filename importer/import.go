@@ -32,7 +32,8 @@ type Config struct {
 	MaxLength      float64 // or after this many meters
 	LowZoom        int     // trace_segments_low is simplified for this zoom
 	ExpireDir      string  // "" disables expire files
-	ExpireZoom     int
+	ExpireMinZoom  int     // expire files have the tiles from ExpireMinZoom to ExpireMaxZoom
+	ExpireMaxZoom  int
 	MaxDeleteRatio float64 // stop if the run would delete more than this share of traces
 	Log            *log.Logger
 }
@@ -44,7 +45,8 @@ func DefaultConfig() Config {
 		MaxPoints:      1000,
 		MaxLength:      50000,
 		LowZoom:        8,
-		ExpireZoom:     14,
+		ExpireMinZoom:  0,
+		ExpireMaxZoom:  14,
 		MaxDeleteRatio: 0.5,
 		Log:            log.Default(),
 	}
@@ -101,7 +103,7 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 	// The first load writes no expire file, the first render is complete.
 	var exp *Expire
 	if !st.FirstLoad && cfg.ExpireDir != "" {
-		if exp, err = NewExpire(cfg.ExpireDir, cfg.ExpireZoom, time.Now()); err != nil {
+		if exp, err = NewExpire(cfg.ExpireDir, cfg.ExpireMinZoom, cfg.ExpireMaxZoom, time.Now()); err != nil {
 			return st, err
 		}
 	}

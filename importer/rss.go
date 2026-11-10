@@ -107,7 +107,7 @@ func RunRSS(ctx context.Context, conn *pgx.Conn, f *Fetcher, cfg Config, rc RSSC
 
 	var exp *Expire
 	if cfg.ExpireDir != "" {
-		if exp, err = NewExpire(cfg.ExpireDir, cfg.ExpireZoom, time.Now()); err != nil {
+		if exp, err = NewExpire(cfg.ExpireDir, cfg.ExpireMinZoom, cfg.ExpireMaxZoom, time.Now()); err != nil {
 			return st, err
 		}
 	}

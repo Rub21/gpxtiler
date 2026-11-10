@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -68,7 +69,8 @@ func commonFlags(fs *flag.FlagSet, cfg *importer.Config) *string {
 	fs.Float64Var(&cfg.MaxLength, "max-length", cfg.MaxLength, "cut lines after this many meters")
 	fs.IntVar(&cfg.LowZoom, "low-zoom", cfg.LowZoom, "zoom used to simplify trace_segments_low")
 	fs.StringVar(&cfg.ExpireDir, "expire-dir", envOr("GPXTILER_EXPIRE_DIR", ""), "folder for expire files, empty to disable (env GPXTILER_EXPIRE_DIR)")
-	fs.IntVar(&cfg.ExpireZoom, "expire-zoom", cfg.ExpireZoom, "zoom of the tiles in the expire files")
+	fs.IntVar(&cfg.ExpireMinZoom, "expire-min-zoom", envInt("GPXTILER_EXPIRE_MIN_ZOOM", cfg.ExpireMinZoom), "lowest zoom in the expire files (env GPXTILER_EXPIRE_MIN_ZOOM)")
+	fs.IntVar(&cfg.ExpireMaxZoom, "expire-max-zoom", envInt("GPXTILER_EXPIRE_MAX_ZOOM", cfg.ExpireMaxZoom), "highest zoom in the expire files (env GPXTILER_EXPIRE_MAX_ZOOM)")
 	fs.DurationVar(&lockWait, "lock-wait", lockWait, "when another import or update is running, wait this long for it")
 	return db
 }
@@ -169,7 +171,7 @@ func runServe(args []string) error {
 	lowZoom := fs.Int("low-zoom", importer.DefaultConfig().LowZoom, "zooms up to this one read trace_segments_low (same as import -low-zoom)")
 	minLive := fs.Int("min-live-zoom", 6, "tiles below this zoom are read from -tile-dir, not drawn on the fly")
 	maxZoom := fs.Int("max-zoom", 20, "highest zoom")
-	colors := fs.Int("colors", 64, "colors per PNG, like pngquant on the current tiles; 0 for full color")
+	colors := fs.Int("colors", envInt("GPXTILER_COLORS", 64), "colors per PNG, like pngquant on the current tiles; 0 for full color (env GPXTILER_COLORS)")
 	tileDir := fs.String("tile-dir", envOr("GPXTILER_TILE_DIR", ""), "folder with the low zoom tiles from render (env GPXTILER_TILE_DIR)")
 	maxRenders := fs.Int("max-renders", runtime.NumCPU(), "tiles drawn at the same time")
 	maxAge := fs.Duration("max-age", time.Hour, "Cache-Control max-age of the tiles")
@@ -290,6 +292,14 @@ func openInput(name string) (io.Reader, func(), error) {
 		return gz, closeFn, nil
 	}
 	return r, closeFn, nil
+}
+
+// envInt reads an integer from the environment, or def when unset or bad.
+func envInt(key string, def int) int {
+	if v, err := strconv.Atoi(os.Getenv(key)); err == nil {
+		return v
+	}
+	return def
 }
 
 func envOr(key, def string) string {
