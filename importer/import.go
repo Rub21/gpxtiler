@@ -11,11 +11,11 @@ package importer
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -36,6 +36,7 @@ type Config struct {
 	ExpireMinZoom  int     // expire files have the tiles from ExpireMinZoom to ExpireMaxZoom
 	ExpireMaxZoom  int
 	MaxDeleteRatio float64 // stop if the run would delete more than this share of traces
+	Workers        int     // goroutines parsing the dump
 	Log            *log.Logger
 }
 
@@ -50,6 +51,7 @@ func DefaultConfig() Config {
 		ExpireMinZoom:  0,
 		ExpireMaxZoom:  14,
 		MaxDeleteRatio: 0.5,
+		Workers:        min(runtime.NumCPU(), 8),
 		Log:            log.Default(),
 	}
 }
@@ -71,7 +73,7 @@ type Stats struct {
 // dump_state is written only at the end.
 func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, error) {
 	var st Stats
-	rd, err := NewReader(in)
+	rd, ds, err := openDump(in)
 	if err != nil {
 		return st, err
 	}
@@ -108,19 +110,35 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 		}
 	}
 
-	split := cfg.split()
-	skipGeom := func(id int64) bool { _, ok := ids[id]; return ok }
+	// The workers read their own copy of the loaded ids; this loop writes
+	// the ones seen in the dump into ids.
+	known := make(map[int64]struct{}, len(ids))
+	for id := range ids {
+		known[id] = struct{}{}
+	}
+	skipGeom := func(id int64) bool { _, ok := known[id]; return ok }
+	parsedCh := make(chan *parsed, 2*max(1, cfg.Workers))
+	pctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var parseErr error
+	parseDone := make(chan struct{})
+	go func() {
+		parseErr = parseAll(pctx, ds, cfg.Workers, skipGeom, cfg.split(), parsedCh)
+		close(parseDone)
+	}()
+	fail := func(err error) (Stats, error) {
+		cancel()
+		for range parsedCh { // let the workers stop
+		}
+		<-parseDone
+		return st, err
+	}
+
 	b := &batch{}
 	total := 0
 	var dumpMax int64 // highest trace id in the dump
-	for {
-		t, err := rd.Next(skipGeom)
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return st, fmt.Errorf("reading dump: %w", err)
-		}
+	for p := range parsedCh {
+		t := p.t
 		total++
 		dumpMax = max(dumpMax, t.ID)
 		seen, known := ids[t.ID]
@@ -132,18 +150,22 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 			b.addUpdate(t)
 			st.Updated++
 		default:
-			st.Segments += b.addNew(t, split, exp)
+			st.Segments += b.addParsed(p, exp)
 			st.Inserted++
 		}
 		ids[t.ID] = true
 		if b.count >= cfg.BatchSize {
 			if err := b.flush(ctx, conn, exp); err != nil {
-				return st, err
+				return fail(err)
 			}
 		}
 		if total%100000 == 0 {
 			cfg.Log.Printf("%d traces read (%d new, %d updated)", total, st.Inserted, st.Updated)
 		}
+	}
+	<-parseDone
+	if parseErr != nil {
+		return st, parseErr
 	}
 	if err := b.flush(ctx, conn, exp); err != nil {
 		return st, err
@@ -320,29 +342,28 @@ type batch struct {
 }
 
 func (b *batch) addNew(t *Trace, cfg SplitConfig, exp *Expire) int {
+	return b.addParsed(buildRows(t, cfg), exp)
+}
+
+// addParsed adds a new trace with its rows already built.
+func (b *batch) addParsed(p *parsed, exp *Expire) int {
 	b.count++
-	writeTrace(&b.traces, t)
-	writeTags(&b.tags, t)
-	n := 0
-	for trackid, pts := range t.Segments {
-		lines, low := BuildTrack(pts, cfg)
-		for seg, l := range lines {
-			fmt.Fprintf(&b.segments, "%d\t%d\t%d\t%s\t%s\t%s\n", t.ID, trackid, seg,
-				hex.EncodeToString(EWKBLineString(l.Points)), copyTime(l.Start), copyTime(l.End))
-			exp.AddLine(l.Points)
-			n++
-		}
-		for z, parts := range low {
-			if b.low == nil {
-				b.low = map[int]*bytes.Buffer{}
-			}
-			if b.low[z] == nil {
-				b.low[z] = &bytes.Buffer{}
-			}
-			fmt.Fprintf(b.low[z], "%d\t%d\t%s\n", t.ID, trackid, hex.EncodeToString(EWKBMultiLineString(parts)))
-		}
+	writeTrace(&b.traces, p.t)
+	writeTags(&b.tags, p.t)
+	b.segments.Write(p.segRows)
+	for _, l := range p.lines {
+		exp.AddLine(l.Points)
 	}
-	return n
+	for z, rows := range p.lowRows {
+		if b.low == nil {
+			b.low = map[int]*bytes.Buffer{}
+		}
+		if b.low[z] == nil {
+			b.low[z] = &bytes.Buffer{}
+		}
+		b.low[z].Write(rows)
+	}
+	return p.n
 }
 
 func (b *batch) addUpdate(t *Trace) {

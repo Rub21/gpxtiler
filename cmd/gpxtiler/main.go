@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime"
 	"slices"
@@ -343,6 +344,7 @@ func runImport(args []string) error {
 		}
 	}
 	fs.Float64Var(&cfg.MaxDeleteRatio, "max-delete-ratio", cfg.MaxDeleteRatio, "stop if more than this share of traces would be deleted, 0 to disable")
+	fs.IntVar(&cfg.Workers, "workers", cfg.Workers, "goroutines parsing the dump (default: the number of cores, up to 8)")
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		return fmt.Errorf("import needs one FILE\n\n%s", usage)
@@ -399,7 +401,23 @@ func openInput(name string) (io.Reader, func(), error) {
 	r := bufio.NewReaderSize(f, 1<<20)
 	switch {
 	case strings.HasSuffix(name, ".bz2"):
-		// Go's bzip2 is slow; for big files pipe lbzip2 -dc into "-".
+		// Go's bzip2 is slow and uses one core. lbzip2 (in the Docker image)
+		// unpacks with all the cores in another process; Go only parses.
+		if lbzip2, err := exec.LookPath("lbzip2"); err == nil {
+			cmd := exec.Command(lbzip2, "-dc")
+			cmd.Stdin = r
+			cmd.Stderr = os.Stderr
+			out, err := cmd.StdoutPipe()
+			if err == nil {
+				err = cmd.Start()
+			}
+			if err != nil {
+				f.Close()
+				return nil, nil, err
+			}
+			log.Printf("unpacking with lbzip2")
+			return out, func() { cmd.Process.Kill(); cmd.Wait(); f.Close() }, nil
+		}
 		return bzip2.NewReader(r), closeFn, nil
 	case strings.HasSuffix(name, ".gz"):
 		gz, err := gzip.NewReader(r)
