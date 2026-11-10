@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 //go:embed viewer.html
@@ -22,20 +24,21 @@ var viewerHTML []byte
 // gps-tile.openstreetmap.org, so JOSM and iD keep working.
 type Server struct {
 	Renderer *Renderer
-	// Tiles up to PreZoom are too big to draw on the fly at planet size:
-	// they come from TileDir, written by "render", or are empty. Tiles from
-	// PreZoom+1 to CacheZoom are drawn once and kept in TileDir; "render"
-	// removes the expired ones. Above CacheZoom they are always drawn.
-	PreZoom   int // -1: nothing pre-rendered
-	CacheZoom int // same as PreZoom: no cache
+	// A tile is read from TileDir when it is there, or drawn. Tiles up to
+	// CacheZoom are kept in TileDir after they are drawn, so the next
+	// request reads them; "render" writes the low zooms there in advance
+	// and removes or redraws the expired ones. Above CacheZoom a tile is
+	// drawn on every request.
+	CacheZoom int
 	MaxZoom   int
 	TileDir   string        // "" when there are no tiles on disk
 	MaxAge    time.Duration // Cache-Control max-age
 	Timeout   time.Duration // stop drawing a tile after this time
 	Log       *log.Logger
 
-	sem   chan struct{} // limits the tiles drawn at the same time
-	empty []byte        // transparent tile
+	sem    chan struct{}      // limits the tiles drawn at the same time
+	single singleflight.Group // one draw per tile when many ask for it
+	empty  []byte             // transparent tile
 }
 
 // Handler returns the HTTP handler. maxRenders is the number of tiles drawn
@@ -95,7 +98,7 @@ func (s *Server) tile(w http.ResponseWriter, r *http.Request) {
 	if onDisk {
 		data = ReadTile(s.TileDir, z, x, y)
 	}
-	if data == nil && z > s.PreZoom {
+	if data == nil {
 		data, err = s.draw(r.Context(), z, x, y)
 		if err != nil {
 			if r.Context().Err() == nil {
@@ -120,15 +123,24 @@ func (s *Server) tile(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-// draw renders a tile, waiting for a free slot.
+// draw renders a tile, waiting for a free slot. When the same tile is
+// asked for by many requests at once (a low zoom tile not on disk yet),
+// it is drawn once and they all get that result.
 func (s *Server) draw(ctx context.Context, z, x, y int) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, s.Timeout)
-	defer cancel()
-	select {
-	case s.sem <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	key := fmt.Sprintf("%d/%d/%d", z, x, y)
+	v, err, _ := s.single.Do(key, func() (any, error) {
+		ctx, cancel := context.WithTimeout(ctx, s.Timeout)
+		defer cancel()
+		select {
+		case s.sem <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		defer func() { <-s.sem }()
+		return s.Renderer.Render(ctx, z, x, y)
+	})
+	if err != nil {
+		return nil, err
 	}
-	defer func() { <-s.sem }()
-	return s.Renderer.Render(ctx, z, x, y)
+	return v.([]byte), nil
 }

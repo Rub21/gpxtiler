@@ -199,11 +199,10 @@ func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	db := fs.String("db", envOr("GPXTILER_DB", "postgres://localhost/gpxtiler"), "PostgreSQL connection string (env GPXTILER_DB)")
 	listen := fs.String("listen", envOr("GPXTILER_LISTEN", ":8080"), "address to listen on (env GPXTILER_LISTEN)")
-	preZoom := fs.Int("pre-zoom", envInt("GPXTILER_PRE_ZOOM", 9), "tiles up to this zoom come from -tile-dir (made by render), -1 to draw all (env GPXTILER_PRE_ZOOM)")
-	cacheZoom := fs.Int("cache-zoom", envInt("GPXTILER_CACHE_ZOOM", 14), "tiles up to this zoom are kept in -tile-dir after the first draw (env GPXTILER_CACHE_ZOOM)")
+	cacheZoom := fs.Int("cache-zoom", envInt("GPXTILER_CACHE_ZOOM", 14), "tiles up to this zoom are kept in -tile-dir once drawn (env GPXTILER_CACHE_ZOOM)")
 	maxZoom := fs.Int("max-zoom", 20, "highest zoom")
 	colors := fs.Int("colors", envInt("GPXTILER_COLORS", 64), "colors per PNG, like pngquant on the current tiles; 0 for full color (env GPXTILER_COLORS)")
-	tileDir := fs.String("tile-dir", envOr("GPXTILER_TILE_DIR", ""), "folder with the tiles on disk, empty to draw everything (env GPXTILER_TILE_DIR)")
+	tileDir := fs.String("tile-dir", envOr("GPXTILER_TILE_DIR", ""), "folder with the tiles on disk (made by render and by serve), empty to draw everything (env GPXTILER_TILE_DIR)")
 	maxRenders := fs.Int("max-renders", runtime.NumCPU(), "tiles drawn at the same time")
 	maxAge := fs.Duration("max-age", time.Hour, "Cache-Control max-age of the tiles")
 	timeout := fs.Duration("timeout", 30*time.Second, "stop drawing a tile after this time")
@@ -235,7 +234,6 @@ func runServe(args []string) error {
 	log.Printf("simplified copies for zooms %v", rend.LowZooms)
 	srv := &tiles.Server{
 		Renderer:  rend,
-		PreZoom:   *preZoom,
 		CacheZoom: *cacheZoom,
 		MaxZoom:   *maxZoom,
 		TileDir:   *tileDir,
@@ -265,8 +263,8 @@ func runRender(args []string) error {
 	all := fs.Bool("all", false, "draw every tile with lines from -min-zoom to -max-zoom, instead of reading the expire files")
 	minZoom := fs.Int("min-zoom", 0, "lowest zoom to draw")
 	maxZoom := fs.Int("max-zoom", -1, "with -all: highest zoom to draw (default -pre-zoom)")
-	preZoom := fs.Int("pre-zoom", envInt("GPXTILER_PRE_ZOOM", 9), "tiles up to this zoom are pre-rendered (same as serve)")
-	cacheZoom := fs.Int("cache-zoom", envInt("GPXTILER_CACHE_ZOOM", 14), "tiles up to this zoom are cached by serve and removed when expired")
+	preZoom := fs.Int("pre-zoom", envInt("GPXTILER_PRE_ZOOM", 9), "tiles up to this zoom are drawn by -all and redrawn when expired (env GPXTILER_PRE_ZOOM)")
+	cacheZoom := fs.Int("cache-zoom", envInt("GPXTILER_CACHE_ZOOM", 14), "tiles above -pre-zoom up to this zoom are removed when expired, serve draws them again (env GPXTILER_CACHE_ZOOM)")
 	workers := fs.Int("workers", runtime.NumCPU(), "tiles drawn at the same time")
 	colors := fs.Int("colors", envInt("GPXTILER_COLORS", 64), "colors per PNG (env GPXTILER_COLORS)")
 	fs.Parse(args)

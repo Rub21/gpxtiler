@@ -30,6 +30,21 @@ const gpx10 = `<?xml version="1.0"?>
 </gpx>
 `
 
+func TestParseOriginalLatin1(t *testing.T) {
+	// A GPX in ISO-8859-1, with a name that has a byte that is not UTF-8.
+	gpx := "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n" +
+		"<gpx version=\"1.1\"><trk><name>Caf\xe9</name><trkseg>" +
+		"<trkpt lat=\"1\" lon=\"2\"></trkpt><trkpt lat=\"1\" lon=\"2.1\"></trkpt>" +
+		"</trkseg></trk></gpx>"
+	segs, err := ParseOriginal(strings.NewReader(gpx))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segs) != 1 || len(segs[0]) != 2 {
+		t.Fatalf("got %d segments %v", len(segs), segs)
+	}
+}
+
 func TestParseOriginal(t *testing.T) {
 	segs, err := ParseOriginal(strings.NewReader(gpx11))
 	if err != nil {

@@ -2,7 +2,10 @@ package importer
 
 import (
 	"encoding/xml"
+	"fmt"
 	"io"
+
+	"golang.org/x/text/encoding/ianaindex"
 )
 
 // ParseOriginal reads the track segments of an original GPX file, as the
@@ -13,6 +16,7 @@ import (
 func ParseOriginal(in io.Reader) ([][]Point, error) {
 	r := &Reader{dec: xml.NewDecoder(in)}
 	r.dec.Strict = false
+	r.dec.CharsetReader = charsetReader
 	var segs [][]Point
 	for {
 		tok, err := r.dec.Token()
@@ -42,4 +46,14 @@ func countPoints(segs [][]Point) int {
 		n += len(s)
 	}
 	return n
+}
+
+// charsetReader lets the XML decoder read files that declare another
+// encoding than UTF-8, like ISO-8859-1. Some GPS devices write those.
+func charsetReader(label string, in io.Reader) (io.Reader, error) {
+	enc, err := ianaindex.IANA.Encoding(label)
+	if err != nil || enc == nil {
+		return nil, fmt.Errorf("encoding %q is not supported", label)
+	}
+	return enc.NewDecoder().Reader(in), nil
 }

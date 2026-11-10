@@ -153,7 +153,6 @@ func TestServer(t *testing.T) {
 
 	s := &Server{
 		Renderer:  &Renderer{Pool: pool, LowZooms: []int{5, 8, 11}},
-		PreZoom:   5,
 		CacheZoom: 14,
 		MaxZoom:   20,
 		TileDir:   dir,
@@ -190,12 +189,16 @@ func TestServer(t *testing.T) {
 	if resp, body := get("/lines/16/0/0.png"); resp.StatusCode != 200 || len(body) == 0 {
 		t.Errorf("empty tile: %d", resp.StatusCode)
 	}
-	// Low zoom: from disk, or empty when missing.
+	// Low zoom: from disk when render made it, drawn and kept when not.
 	if _, body := get("/lines/2/2/1.png"); string(body) != "disk tile" {
 		t.Errorf("disk tile: %q", body)
 	}
 	if resp, body := get("/lines/2/0/0.png"); resp.StatusCode != 200 || !bytes.Equal(body, s.empty) {
-		t.Errorf("missing disk tile should be empty")
+		t.Errorf("empty low zoom tile: %d", resp.StatusCode)
+	}
+	_, body3 := get("/lines/3/4/2.png")
+	if cached := ReadTile(dir, 3, 4, 2); len(body3) == 0 || !bytes.Equal(cached, body3) {
+		t.Errorf("low zoom tile drawn by serve not kept on disk")
 	}
 	// Cached zoom: drawn once, then read from disk. Empty tiles are not kept.
 	if _, err := os.Stat(TilePath(dir, 14, z16x/4, z16y/4)); err == nil {
