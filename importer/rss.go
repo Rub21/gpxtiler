@@ -17,7 +17,11 @@ import (
 type RSSConfig struct {
 	MaxTraces int           // stop after checking this many ids
 	MaxTime   time.Duration // or after this time, like gpx-updater
-	StartID   int64         // first run only: start after this id (0: highest id in the database)
+	// First run only: start after this id. 0: the highest id in the
+	// database. -1: the highest id in the RSS feed now, so only the traces
+	// uploaded from now on are loaded (for a database loaded from an old
+	// dump, when the traces in between come from the id list).
+	StartID int64
 }
 
 // DefaultRSSConfig returns the default options.
@@ -78,16 +82,16 @@ func RunRSS(ctx context.Context, conn *pgx.Conn, f *Fetcher, cfg Config, rc RSSC
 	var st RSSStats
 	start := time.Now()
 
-	last, err := rssStart(ctx, conn, rc.StartID)
-	if err != nil {
-		return st, err
-	}
 	body, err := f.get(ctx, "/traces/rss")
 	if err != nil {
 		return st, err
 	}
 	max, err := MaxRSSID(body)
 	body.Close()
+	if err != nil {
+		return st, err
+	}
+	last, err := rssStart(ctx, conn, rc.StartID, max)
 	if err != nil {
 		return st, err
 	}
@@ -186,7 +190,7 @@ func RunRSS(ctx context.Context, conn *pgx.Conn, f *Fetcher, cfg Config, rc RSSC
 
 // rssStart returns the last checked id. On the first run it is startID, or
 // the highest id in the database when startID is 0.
-func rssStart(ctx context.Context, conn *pgx.Conn, startID int64) (int64, error) {
+func rssStart(ctx context.Context, conn *pgx.Conn, startID, rssMax int64) (int64, error) {
 	var last int64
 	err := conn.QueryRow(ctx, "SELECT last_id FROM rss_state").Scan(&last)
 	if err == nil {
@@ -195,17 +199,24 @@ func rssStart(ctx context.Context, conn *pgx.Conn, startID int64) (int64, error)
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return 0, err
 	}
-	if startID > 0 {
-		return startID, nil
+	switch {
+	case startID > 0:
+		last = startID
+	case startID < 0:
+		last = rssMax
+	default:
+		var max *int64
+		if err := conn.QueryRow(ctx, "SELECT max(gpx_id) FROM traces").Scan(&max); err != nil {
+			return 0, err
+		}
+		if max == nil {
+			return 0, errors.New("the database is empty: load a dump with import first, or set -start-id")
+		}
+		last = *max
 	}
-	var max *int64
-	if err := conn.QueryRow(ctx, "SELECT max(gpx_id) FROM traces").Scan(&max); err != nil {
-		return 0, err
-	}
-	if max == nil {
-		return 0, errors.New("the database is empty: load a dump with import first, or set -start-id")
-	}
-	return *max, nil
+	// Keep it, so the next run goes on from here even if nothing is loaded now.
+	_, err = conn.Exec(ctx, "INSERT INTO rss_state (id, last_id) VALUES (true, $1)", last)
+	return last, err
 }
 
 func loadIDRange(ctx context.Context, conn *pgx.Conn, after, to int64) (map[int64]bool, error) {

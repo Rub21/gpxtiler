@@ -7,7 +7,9 @@ gpxtiler loads the OpenStreetMap GPS traces into PostGIS, keeps them up to date 
 # once: load the GPX dump, with a simplified copy of the lines for zoom 5, 8 and 11
 gpxtiler import -simplified-zooms 5,8,11 -expire-dir /data/expire gpx-latest.gpx.bz2
 
-# every few minutes: new traces from the RSS feed of the website
+# every few minutes: new traces from the RSS feed of the website. The first run starts
+# after the highest id in the database; -start-id latest starts at the newest trace
+# in the feed instead (for an old dump: the traces in between come from the id list)
 gpxtiler update -rss -site https://www.openstreetmap.org -expire-dir /data/expire
 
 # daily: sync with the list of identifiable trace ids (delete, download the missing ones)

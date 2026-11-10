@@ -228,6 +228,33 @@ func TestRunRSSSkipsLoaded(t *testing.T) {
 	}
 }
 
+func TestRunRSSStartLatest(t *testing.T) {
+	conn := testConn(t)
+	ctx := context.Background()
+	cfg := testConfig(t.TempDir())
+	// The database has an old dump; the RSS is far ahead. With StartID -1
+	// the traces in between are skipped and the next upload is loaded.
+	if _, err := Run(ctx, conn, dump("2026-10-31T00:00:00Z", trk(100, "")), cfg); err != nil {
+		t.Fatal(err)
+	}
+	srv := fakeSite(t, []int64{5000}, map[int64]string{5001: gpx10}, nil)
+	f := NewFetcher(srv.URL)
+	f.Delay = 0
+	rc := DefaultRSSConfig()
+	rc.StartID = -1
+	st, err := RunRSS(ctx, conn, f, cfg, rc)
+	if err != nil || st.Checked != 0 {
+		t.Fatalf("first run: %+v, %v", st, err)
+	}
+	srv2 := fakeSite(t, []int64{5001}, map[int64]string{5001: gpx10}, nil)
+	f2 := NewFetcher(srv2.URL)
+	f2.Delay = 0
+	st, err = RunRSS(ctx, conn, f2, cfg, rc)
+	if err != nil || st.Inserted != 1 || st.FromID != 5001 {
+		t.Fatalf("second run: %+v, %v", st, err)
+	}
+}
+
 func TestRunRSSEmptyDatabase(t *testing.T) {
 	conn := testConn(t)
 	srv := fakeSite(t, []int64{5}, nil, nil)

@@ -127,7 +127,18 @@ func runUpdate(args []string) error {
 	delay := fs.Duration("delay", 500*time.Millisecond, "pause between requests to the website")
 	fs.IntVar(&rc.MaxTraces, "max-traces", rc.MaxTraces, "download or check at most this many traces per run")
 	fs.DurationVar(&rc.MaxTime, "max-time", rc.MaxTime, "stop the run after this time")
-	fs.Int64Var(&rc.StartID, "start-id", 0, "-rss, first run only: start after this trace id (default: highest id in the database)")
+	fs.Func("start-id", "-rss, first run only: start after this trace id, or \"latest\" to start at the newest trace in the RSS feed (default: the highest id in the database)", func(v string) error {
+		if v == "" {
+			return nil
+		}
+		if v == "latest" {
+			rc.StartID = -1
+			return nil
+		}
+		var err error
+		rc.StartID, err = strconv.ParseInt(v, 10, 64)
+		return err
+	})
 	fs.Float64Var(&cfg.MaxDeleteRatio, "max-delete-ratio", cfg.MaxDeleteRatio, "-ids: stop if more than this share of traces would be deleted, 0 to disable")
 	fs.Parse(args)
 	if *rss == (*ids != "") || fs.NArg() != 0 {
