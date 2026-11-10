@@ -69,17 +69,6 @@ func commonFlags(fs *flag.FlagSet, cfg *importer.Config) *string {
 	fs.IntVar(&cfg.BatchSize, "batch", cfg.BatchSize, "traces per transaction")
 	fs.IntVar(&cfg.MaxPoints, "max-points", cfg.MaxPoints, "cut lines after this many points")
 	fs.Float64Var(&cfg.MaxLength, "max-length", cfg.MaxLength, "cut lines after this many meters")
-	fs.Func("simplified-zooms", "zooms with a simplified copy of the lines (trace_segments_z<N>) for the low zoom tiles (env GPXTILER_SIMPLIFIED_ZOOMS, default 5,8,11)", func(s string) error {
-		var err error
-		cfg.LowZooms, err = parseZooms(s)
-		return err
-	})
-	if v := os.Getenv("GPXTILER_SIMPLIFIED_ZOOMS"); v != "" {
-		var err error
-		if cfg.LowZooms, err = parseZooms(v); err != nil {
-			log.Fatalf("GPXTILER_SIMPLIFIED_ZOOMS: %v", err)
-		}
-	}
 	fs.Float64Var(&cfg.LowMaxJump, "low-max-jump", cfg.LowMaxJump, "cut the simplified copies at GPS jumps longer than this many meters, 0 to keep them")
 	fs.StringVar(&cfg.ExpireDir, "expire-dir", envOr("GPXTILER_EXPIRE_DIR", ""), "folder for expire files, empty to disable (env GPXTILER_EXPIRE_DIR)")
 	fs.IntVar(&cfg.ExpireMinZoom, "expire-min-zoom", envInt("GPXTILER_EXPIRE_MIN_ZOOM", cfg.ExpireMinZoom), "lowest zoom in the expire files (env GPXTILER_EXPIRE_MIN_ZOOM)")
@@ -331,6 +320,17 @@ func runImport(args []string) error {
 	cfg := importer.DefaultConfig()
 	fs := flag.NewFlagSet("import", flag.ExitOnError)
 	db := commonFlags(fs, &cfg)
+	fs.Func("simplified-zooms", "zooms with a simplified copy of the lines (trace_segments_z<N>) for the low zoom tiles; update reads them from the database (env GPXTILER_SIMPLIFIED_ZOOMS, default 5,8,11)", func(s string) error {
+		var err error
+		cfg.LowZooms, err = parseZooms(s)
+		return err
+	})
+	if v := os.Getenv("GPXTILER_SIMPLIFIED_ZOOMS"); v != "" {
+		var err error
+		if cfg.LowZooms, err = parseZooms(v); err != nil {
+			log.Fatalf("GPXTILER_SIMPLIFIED_ZOOMS: %v", err)
+		}
+	}
 	fs.Float64Var(&cfg.MaxDeleteRatio, "max-delete-ratio", cfg.MaxDeleteRatio, "stop if more than this share of traces would be deleted, 0 to disable")
 	fs.Parse(args)
 	if fs.NArg() != 1 {

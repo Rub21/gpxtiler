@@ -99,7 +99,8 @@ func RunRSS(ctx context.Context, conn *pgx.Conn, f *Fetcher, cfg Config, rc RSSC
 	to := min(max, last+int64(rc.MaxTraces))
 	cfg.Log.Printf("checking traces %d to %d (RSS %d)", last+1, to, max)
 
-	if err := EnsureLowTables(ctx, conn, cfg.LowZooms); err != nil {
+	// The simplified copies are the ones import made.
+	if cfg.LowZooms, err = LowZooms(ctx, conn); err != nil {
 		return st, err
 	}
 	// Ids already loaded, for example by a newer dump.

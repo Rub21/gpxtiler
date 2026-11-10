@@ -85,7 +85,9 @@ func RunIDs(ctx context.Context, conn *pgx.Conn, f *Fetcher, list []int64, cfg C
 		inList[id] = true
 		st.ListMax = max(st.ListMax, id)
 	}
-	if err := EnsureLowTables(ctx, conn, cfg.LowZooms); err != nil {
+	// The simplified copies are the ones import made.
+	var err error
+	if cfg.LowZooms, err = LowZooms(ctx, conn); err != nil {
 		return st, err
 	}
 	dbIDs, err := loadIDs(ctx, conn)

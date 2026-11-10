@@ -4,8 +4,8 @@ gpxtiler loads the OpenStreetMap GPS traces into PostGIS, keeps them up to date 
 
 
 ```sh
-# once: load the GPX dump
-gpxtiler import -expire-dir /data/expire gpx-latest.gpx.bz2
+# once: load the GPX dump, with a simplified copy of the lines for zoom 5, 8 and 11
+gpxtiler import -simplified-zooms 5,8,11 -expire-dir /data/expire gpx-latest.gpx.bz2
 
 # every few minutes: new traces from the RSS feed of the website
 gpxtiler update -rss -site https://www.openstreetmap.org -expire-dir /data/expire
@@ -37,7 +37,7 @@ gpxtiler render -expired -zooms 6-9 -expire-dir /data/expire -tile-dir /data/til
 
 ## Two ideas to know
 
-**1. The lines are stored four times, with less detail each time.** `import` keeps the full lines in `trace_segments` and a simplified copy for zoom 11, 8 and 5 (`trace_segments_z11`, `_z8`, `_z5`): at zoom 5 a trace of 10,000 points is 20 pixels long, so the copy keeps about 20 points. A tile is always drawn from the copy closest to its zoom, so the low zooms do not read millions of points.
+**1. The lines are stored four times, with less detail each time.** `import -simplified-zooms 5,8,11` keeps the full lines in `trace_segments` and a simplified copy for zoom 11, 8 and 5 (`trace_segments_z11`, `_z8`, `_z5`); `update` fills the same copies: at zoom 5 a trace of 10,000 points is 20 pixels long, so the copy keeps about 20 points. A tile is always drawn from the copy closest to its zoom, so the low zooms do not read millions of points.
 
 **2. A tile is drawn once and kept on disk.** `serve` reads a tile from `-tile-dir`; when it is not there, it draws it and keeps it there if the zoom is 14 or less. Above that a tile is small and fast, so it is drawn on every request. A tile of zoom 0 to 9 covers a big area and is slow to draw, so `render -zooms 0-9` draws all of them in advance; without it, the first request of each one is slow.
 
