@@ -46,13 +46,37 @@ func jumpLength(z int) float64 {
 // Renderer draws PNG tiles from the trace tables.
 type Renderer struct {
 	Pool *pgxpool.Pool
-	// LowZoom: zooms up to this one read trace_segments_low, which is
-	// simplified to one pixel at that zoom. The same value as import -low-zoom.
-	LowZoom int
+	// LowZooms: the zooms with a simplified copy of the lines
+	// (trace_segments_z<N>, made by import). A tile reads the copy of the
+	// lowest zoom that is not below its own; above the highest copy it
+	// reads trace_segments. Use LoadLowZooms to fill it from the database.
+	LowZooms []int
 	// Colors: reduce each PNG to this many colors, like pngquant does for
 	// the current tiles (64). The file gets about 4 times smaller. 0 keeps
 	// full color.
 	Colors int
+}
+
+// LoadLowZooms reads from the database which simplified copies exist.
+func (r *Renderer) LoadLowZooms(ctx context.Context) error {
+	conn, err := r.Pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+	r.LowZooms, err = importer.LowZooms(ctx, conn.Conn())
+	return err
+}
+
+// table returns the table to read for a tile zoom, and whether it is a
+// simplified copy.
+func (r *Renderer) table(z int) (string, bool) {
+	for _, lz := range r.LowZooms { // sorted
+		if z <= lz {
+			return importer.LowTable(lz), true
+		}
+	}
+	return "trace_segments", false
 }
 
 // tileBounds returns the Web Mercator bounds of a tile.
@@ -94,12 +118,10 @@ func (r *Renderer) Draw(ctx context.Context, z, x, y int) (*Canvas, error) {
 	// clipped or simplified in SQL: that would change the length of the
 	// edges and so their brightness. Import already cuts lines every 1000
 	// points or 50 km, so the rows are small.
-	sql := `SELECT ST_AsBinary(geom) FROM trace_segments
-	         WHERE geom && ST_TileEnvelope($1, $2, $3, margin => 1.0 / 256)`
-	low := z <= r.LowZoom
+	table, low := r.table(z)
+	sql := "SELECT ST_AsBinary(geom) FROM " + table + " WHERE geom && ST_TileEnvelope($1, $2, $3, margin => 1.0 / 256)"
 	if low {
-		sql = `SELECT ST_AsBinary((ST_Dump(geom)).geom) FROM trace_segments_low
-		        WHERE geom && ST_TileEnvelope($1, $2, $3, margin => 1.0 / 256)`
+		sql = "SELECT ST_AsBinary((ST_Dump(geom)).geom) FROM " + table + " WHERE geom && ST_TileEnvelope($1, $2, $3, margin => 1.0 / 256)"
 	}
 	rows, err := r.Pool.Query(ctx, sql, z, x, y)
 	if err != nil {
@@ -112,9 +134,9 @@ func (r *Renderer) Draw(ctx context.Context, z, x, y int) (*Canvas, error) {
 	bright := lineBright(z)
 	jump := jumpLength(z)
 	if low {
-		// Simplified lines have long edges that are not jumps. Do not dim
-		// edges shorter than 3 pixels of the low zoom.
-		jump = max(jump, 3*2*mercMax/(TileSize*float64(int(1)<<r.LowZoom)))
+		// The simplified copies are already cut at the GPS jumps, and their
+		// long edges come from the simplification, so nothing is dimmed.
+		jump = math.Inf(1)
 	}
 
 	var wkb []byte

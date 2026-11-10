@@ -28,7 +28,8 @@ func TestBuildTrackCutsByPoints(t *testing.T) {
 	for i := 0; i < 25; i++ {
 		pts = append(pts, Point{Lon: 9 + float64(i)*0.0001, Lat: 47})
 	}
-	lines, low := BuildTrack(pts, SplitConfig{MaxPoints: 10, MaxLength: 1e9})
+	lines, lows := BuildTrack(pts, SplitConfig{MaxPoints: 10, MaxLength: 1e9, LowZooms: []int{8}})
+	low := lows[8]
 	// 25 points, 10 per line, border point repeated: 10 + 10 + 7.
 	if len(lines) != 3 {
 		t.Fatalf("got %d lines", len(lines))
@@ -55,7 +56,8 @@ func TestBuildTrackCutsByLength(t *testing.T) {
 
 func TestBuildTrackDateline(t *testing.T) {
 	pts := []Point{{Lon: 179, Lat: 10}, {Lon: 179.9, Lat: 10}, {Lon: -179.9, Lat: 12}, {Lon: -179, Lat: 12}}
-	lines, low := BuildTrack(pts, SplitConfig{MaxPoints: 1000, MaxLength: 1e9})
+	lines, lows := BuildTrack(pts, SplitConfig{MaxPoints: 1000, MaxLength: 1e9, LowZooms: []int{8}})
+	low := lows[8]
 	if len(lines) != 2 || len(low) != 2 {
 		t.Fatalf("lines=%d low=%d", len(lines), len(low))
 	}
@@ -73,9 +75,33 @@ func TestBuildTrackDateline(t *testing.T) {
 	}
 }
 
+// A GPS jump cuts the low zoom line, but not the normal lines.
+func TestBuildTrackCutsLowAtJumps(t *testing.T) {
+	pts := []Point{
+		{Lon: 9.00, Lat: 47}, {Lon: 9.01, Lat: 47}, {Lon: 9.02, Lat: 47},
+		{Lon: 9.50, Lat: 47}, // about 36 km away
+		{Lon: 9.51, Lat: 47}, {Lon: 9.52, Lat: 47},
+	}
+	lines, lows := BuildTrack(pts, SplitConfig{MaxPoints: 1000, MaxLength: 1e9, LowZooms: []int{5, 8}, LowMaxJump: 2000})
+	low := lows[8]
+	if len(lows[5]) != 2 {
+		t.Errorf("low z5 = %d parts, want 2", len(lows[5]))
+	}
+	if len(lines) != 1 || len(lines[0].Points) != 6 {
+		t.Errorf("lines = %d, points = %d, want 1 line with 6 points", len(lines), len(lines[0].Points))
+	}
+	if len(low) != 2 || len(low[0]) < 2 || len(low[1]) < 2 {
+		t.Errorf("low = %d parts, want 2 cut at the jump", len(low))
+	}
+	// With 0 the jump is kept.
+	if _, lows := BuildTrack(pts, SplitConfig{MaxPoints: 1000, MaxLength: 1e9, LowZooms: []int{8}}); len(lows[8]) != 1 {
+		t.Errorf("low = %d parts, want 1 with LowMaxJump 0", len(lows[8]))
+	}
+}
+
 func TestBuildTrackDropsShortPieces(t *testing.T) {
-	lines, low := BuildTrack([]Point{{Lon: 1, Lat: 1}}, SplitConfig{MaxPoints: 1000})
-	if len(lines) != 0 || len(low) != 0 {
+	lines, low := BuildTrack([]Point{{Lon: 1, Lat: 1}}, SplitConfig{MaxPoints: 1000, LowZooms: []int{8}})
+	if len(lines) != 0 || len(low[8]) != 0 {
 		t.Errorf("single point should give nothing")
 	}
 	lines, _ = BuildTrack([]Point{{Lon: 1, Lat: 1}, {Lon: 200, Lat: 1}}, SplitConfig{MaxPoints: 1000})

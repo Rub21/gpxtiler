@@ -85,6 +85,9 @@ func RunIDs(ctx context.Context, conn *pgx.Conn, f *Fetcher, list []int64, cfg C
 		inList[id] = true
 		st.ListMax = max(st.ListMax, id)
 	}
+	if err := EnsureLowTables(ctx, conn, cfg.LowZooms); err != nil {
+		return st, err
+	}
 	dbIDs, err := loadIDs(ctx, conn)
 	if err != nil {
 		return st, err
@@ -125,7 +128,7 @@ func RunIDs(ctx context.Context, conn *pgx.Conn, f *Fetcher, list []int64, cfg C
 		return st, err
 	}
 
-	split := SplitConfig{MaxPoints: cfg.MaxPoints, MaxLength: cfg.MaxLength, LowTolerance: cfg.lowTolerance()}
+	split := cfg.split()
 	b := &batch{}
 	var runErr error
 	done := 0

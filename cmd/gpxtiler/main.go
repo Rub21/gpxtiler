@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -33,9 +34,10 @@ const usage = `usage:
   gpxtiler update -rss [flags]   load new traces from the website RSS feed
   gpxtiler update -ids LIST      delete traces that are not in the id list, load the missing ones
   gpxtiler serve [flags]         serve the PNG tiles on /lines/{z}/{x}/{y}.png
+  gpxtiler render [flags]        apply the expire files to the tiles on disk; -all draws the low zooms
   gpxtiler render                render low zoom tiles (not ready yet)
 
-Run "gpxtiler import -h", "gpxtiler update -h" or "gpxtiler serve -h" to see the flags.`
+Run "gpxtiler <command> -h" to see the flags.`
 
 func main() {
 	if len(os.Args) < 2 {
@@ -51,7 +53,7 @@ func main() {
 	case "serve":
 		err = runServe(os.Args[2:])
 	case "render":
-		err = fmt.Errorf("%s is not ready yet", os.Args[1])
+		err = runRender(os.Args[2:])
 	default:
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
@@ -67,7 +69,18 @@ func commonFlags(fs *flag.FlagSet, cfg *importer.Config) *string {
 	fs.IntVar(&cfg.BatchSize, "batch", cfg.BatchSize, "traces per transaction")
 	fs.IntVar(&cfg.MaxPoints, "max-points", cfg.MaxPoints, "cut lines after this many points")
 	fs.Float64Var(&cfg.MaxLength, "max-length", cfg.MaxLength, "cut lines after this many meters")
-	fs.IntVar(&cfg.LowZoom, "low-zoom", cfg.LowZoom, "zoom used to simplify trace_segments_low")
+	fs.Func("low-zooms", "zooms with a simplified copy of the lines (trace_segments_z<N>) for the low zoom tiles (env GPXTILER_LOW_ZOOMS, default 5,8,11)", func(s string) error {
+		var err error
+		cfg.LowZooms, err = parseZooms(s)
+		return err
+	})
+	if v := os.Getenv("GPXTILER_LOW_ZOOMS"); v != "" {
+		var err error
+		if cfg.LowZooms, err = parseZooms(v); err != nil {
+			log.Fatalf("GPXTILER_LOW_ZOOMS: %v", err)
+		}
+	}
+	fs.Float64Var(&cfg.LowMaxJump, "low-max-jump", cfg.LowMaxJump, "cut the simplified copies at GPS jumps longer than this many meters, 0 to keep them")
 	fs.StringVar(&cfg.ExpireDir, "expire-dir", envOr("GPXTILER_EXPIRE_DIR", ""), "folder for expire files, empty to disable (env GPXTILER_EXPIRE_DIR)")
 	fs.IntVar(&cfg.ExpireMinZoom, "expire-min-zoom", envInt("GPXTILER_EXPIRE_MIN_ZOOM", cfg.ExpireMinZoom), "lowest zoom in the expire files (env GPXTILER_EXPIRE_MIN_ZOOM)")
 	fs.IntVar(&cfg.ExpireMaxZoom, "expire-max-zoom", envInt("GPXTILER_EXPIRE_MAX_ZOOM", cfg.ExpireMaxZoom), "highest zoom in the expire files (env GPXTILER_EXPIRE_MAX_ZOOM)")
@@ -77,6 +90,24 @@ func commonFlags(fs *flag.FlagSet, cfg *importer.Config) *string {
 
 // lockWait is how long import and update wait for another run to finish.
 var lockWait = 30 * time.Minute
+
+// parseZooms reads "5,8,11" into a sorted list of zooms.
+func parseZooms(s string) ([]int, error) {
+	var zooms []int
+	for _, f := range strings.Split(s, ",") {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		z, err := strconv.Atoi(f)
+		if err != nil || z < 0 || z > 20 {
+			return nil, fmt.Errorf("bad zoom %q", f)
+		}
+		zooms = append(zooms, z)
+	}
+	slices.Sort(zooms)
+	return slices.Compact(zooms), nil
+}
 
 // connect opens the database, creates the tables and takes the lock.
 func connect(ctx context.Context, dsn string) (*pgx.Conn, error) {
@@ -168,11 +199,11 @@ func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	db := fs.String("db", envOr("GPXTILER_DB", "postgres://localhost/gpxtiler"), "PostgreSQL connection string (env GPXTILER_DB)")
 	listen := fs.String("listen", envOr("GPXTILER_LISTEN", ":8080"), "address to listen on (env GPXTILER_LISTEN)")
-	lowZoom := fs.Int("low-zoom", importer.DefaultConfig().LowZoom, "zooms up to this one read trace_segments_low (same as import -low-zoom)")
-	minLive := fs.Int("min-live-zoom", 6, "tiles below this zoom are read from -tile-dir, not drawn on the fly")
+	preZoom := fs.Int("pre-zoom", envInt("GPXTILER_PRE_ZOOM", 9), "tiles up to this zoom come from -tile-dir (made by render), -1 to draw all (env GPXTILER_PRE_ZOOM)")
+	cacheZoom := fs.Int("cache-zoom", envInt("GPXTILER_CACHE_ZOOM", 14), "tiles up to this zoom are kept in -tile-dir after the first draw (env GPXTILER_CACHE_ZOOM)")
 	maxZoom := fs.Int("max-zoom", 20, "highest zoom")
 	colors := fs.Int("colors", envInt("GPXTILER_COLORS", 64), "colors per PNG, like pngquant on the current tiles; 0 for full color (env GPXTILER_COLORS)")
-	tileDir := fs.String("tile-dir", envOr("GPXTILER_TILE_DIR", ""), "folder with the low zoom tiles from render (env GPXTILER_TILE_DIR)")
+	tileDir := fs.String("tile-dir", envOr("GPXTILER_TILE_DIR", ""), "folder with the tiles on disk, empty to draw everything (env GPXTILER_TILE_DIR)")
 	maxRenders := fs.Int("max-renders", runtime.NumCPU(), "tiles drawn at the same time")
 	maxAge := fs.Duration("max-age", time.Hour, "Cache-Control max-age of the tiles")
 	timeout := fs.Duration("timeout", 30*time.Second, "stop drawing a tile after this time")
@@ -197,14 +228,20 @@ func runServe(args []string) error {
 	}
 	defer pool.Close()
 
+	rend := &tiles.Renderer{Pool: pool, Colors: *colors}
+	if err := rend.LoadLowZooms(ctx); err != nil {
+		return err
+	}
+	log.Printf("simplified copies for zooms %v", rend.LowZooms)
 	srv := &tiles.Server{
-		Renderer:    &tiles.Renderer{Pool: pool, LowZoom: *lowZoom, Colors: *colors},
-		MinLiveZoom: *minLive,
-		MaxZoom:     *maxZoom,
-		TileDir:     *tileDir,
-		MaxAge:      *maxAge,
-		Timeout:     *timeout,
-		Log:         log.Default(),
+		Renderer:  rend,
+		PreZoom:   *preZoom,
+		CacheZoom: *cacheZoom,
+		MaxZoom:   *maxZoom,
+		TileDir:   *tileDir,
+		MaxAge:    *maxAge,
+		Timeout:   *timeout,
+		Log:       log.Default(),
 	}
 	hs := &http.Server{Addr: *listen, Handler: srv.Handler(*maxRenders), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
@@ -218,6 +255,64 @@ func runServe(args []string) error {
 		return err
 	}
 	return nil
+}
+
+func runRender(args []string) error {
+	fs := flag.NewFlagSet("render", flag.ExitOnError)
+	db := fs.String("db", envOr("GPXTILER_DB", "postgres://localhost/gpxtiler"), "PostgreSQL connection string (env GPXTILER_DB)")
+	tileDir := fs.String("tile-dir", envOr("GPXTILER_TILE_DIR", ""), "folder with the tiles on disk (env GPXTILER_TILE_DIR)")
+	expireDir := fs.String("expire-dir", envOr("GPXTILER_EXPIRE_DIR", ""), "folder with the expire files from import and update (env GPXTILER_EXPIRE_DIR)")
+	all := fs.Bool("all", false, "draw every tile with lines from -min-zoom to -max-zoom, instead of reading the expire files")
+	minZoom := fs.Int("min-zoom", 0, "lowest zoom to draw")
+	maxZoom := fs.Int("max-zoom", -1, "with -all: highest zoom to draw (default -pre-zoom)")
+	preZoom := fs.Int("pre-zoom", envInt("GPXTILER_PRE_ZOOM", 9), "tiles up to this zoom are pre-rendered (same as serve)")
+	cacheZoom := fs.Int("cache-zoom", envInt("GPXTILER_CACHE_ZOOM", 14), "tiles up to this zoom are cached by serve and removed when expired")
+	workers := fs.Int("workers", runtime.NumCPU(), "tiles drawn at the same time")
+	colors := fs.Int("colors", envInt("GPXTILER_COLORS", 64), "colors per PNG (env GPXTILER_COLORS)")
+	fs.Parse(args)
+	if fs.NArg() != 0 || *tileDir == "" || (!*all && *expireDir == "") {
+		return fmt.Errorf("render needs -tile-dir, and -expire-dir or -all\n\n%s", usage)
+	}
+	if *maxZoom < 0 {
+		*maxZoom = *preZoom
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	pcfg, err := pgxpool.ParseConfig(*db)
+	if err != nil {
+		return err
+	}
+	pcfg.MaxConns = int32(*workers + 1)
+	pcfg.ConnConfig.RuntimeParams["default_transaction_read_only"] = "on"
+	pool, err := pgxpool.NewWithConfig(ctx, pcfg)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	rend := &tiles.Renderer{Pool: pool, Colors: *colors}
+	if err := rend.LoadLowZooms(ctx); err != nil {
+		return err
+	}
+
+	// Only one render writes the tiles at a time; a second one waits.
+	lock, err := tiles.Lock(*tileDir)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+
+	g := &tiles.Generator{Renderer: rend, TileDir: *tileDir, PreZoom: *preZoom, CacheZoom: *cacheZoom, Workers: *workers, Log: log.Default()}
+	start := time.Now()
+	var st tiles.Stats
+	if *all {
+		st, err = g.All(ctx, *minZoom, *maxZoom)
+	} else {
+		st, err = g.Expire(ctx, *expireDir, *minZoom)
+	}
+	log.Printf("done in %s: %d expire files, %d tiles drawn, %d written, %d deleted",
+		time.Since(start).Round(time.Second), st.Files, st.Drawn, st.Written, st.Deleted)
+	return err
 }
 
 func runImport(args []string) error {

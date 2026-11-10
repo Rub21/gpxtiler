@@ -10,8 +10,6 @@ import (
 	"image/png"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -24,14 +22,17 @@ var viewerHTML []byte
 // gps-tile.openstreetmap.org, so JOSM and iD keep working.
 type Server struct {
 	Renderer *Renderer
-	// MinLiveZoom: tiles below this zoom are too big to draw on the fly at
-	// planet size. They are read from TileDir, written by "render".
-	MinLiveZoom int
-	MaxZoom     int
-	TileDir     string        // "" when there are no tiles on disk
-	MaxAge      time.Duration // Cache-Control max-age
-	Timeout     time.Duration // stop drawing a tile after this time
-	Log         *log.Logger
+	// Tiles up to PreZoom are too big to draw on the fly at planet size:
+	// they come from TileDir, written by "render", or are empty. Tiles from
+	// PreZoom+1 to CacheZoom are drawn once and kept in TileDir; "render"
+	// removes the expired ones. Above CacheZoom they are always drawn.
+	PreZoom   int // -1: nothing pre-rendered
+	CacheZoom int // same as PreZoom: no cache
+	MaxZoom   int
+	TileDir   string        // "" when there are no tiles on disk
+	MaxAge    time.Duration // Cache-Control max-age
+	Timeout   time.Duration // stop drawing a tile after this time
+	Log       *log.Logger
 
 	sem   chan struct{} // limits the tiles drawn at the same time
 	empty []byte        // transparent tile
@@ -90,9 +91,11 @@ func (s *Server) tile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var data []byte
-	if z < s.MinLiveZoom {
-		data = s.fromDisk(z, x, y)
-	} else {
+	onDisk := s.TileDir != "" && z <= s.CacheZoom
+	if onDisk {
+		data = ReadTile(s.TileDir, z, x, y)
+	}
+	if data == nil && z > s.PreZoom {
 		data, err = s.draw(r.Context(), z, x, y)
 		if err != nil {
 			if r.Context().Err() == nil {
@@ -100,6 +103,13 @@ func (s *Server) tile(w http.ResponseWriter, r *http.Request) {
 			}
 			http.Error(w, "could not draw the tile", http.StatusServiceUnavailable)
 			return
+		}
+		// Keep it for the next request. Empty tiles are cheap to draw
+		// again, so they are not stored.
+		if onDisk && data != nil {
+			if err := WriteTile(s.TileDir, z, x, y, data); err != nil {
+				s.Log.Printf("cache %d/%d/%d: %v", z, x, y, err)
+			}
 		}
 	}
 	if data == nil {
@@ -121,21 +131,4 @@ func (s *Server) draw(ctx context.Context, z, x, y int) ([]byte, error) {
 	}
 	defer func() { <-s.sem }()
 	return s.Renderer.Render(ctx, z, x, y)
-}
-
-// fromDisk reads a low zoom tile written by "render". nil when missing.
-func (s *Server) fromDisk(z, x, y int) []byte {
-	if s.TileDir == "" {
-		return nil
-	}
-	data, err := os.ReadFile(TilePath(s.TileDir, z, x, y))
-	if err != nil {
-		return nil
-	}
-	return data
-}
-
-// TilePath is where a tile is stored on disk: DIR/z/x/y.png.
-func TilePath(dir string, z, x, y int) string {
-	return filepath.Join(dir, strconv.Itoa(z), strconv.Itoa(x), strconv.Itoa(y)+".png")
 }

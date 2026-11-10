@@ -30,7 +30,8 @@ type Config struct {
 	BatchSize      int     // traces per transaction
 	MaxPoints      int     // cut lines after this many points
 	MaxLength      float64 // or after this many meters
-	LowZoom        int     // trace_segments_low is simplified for this zoom
+	LowZooms       []int   // simplified copies trace_segments_z<N>, one per zoom, for the low zoom tiles
+	LowMaxJump     float64 // the simplified copies are cut at edges longer than this many meters
 	ExpireDir      string  // "" disables expire files
 	ExpireMinZoom  int     // expire files have the tiles from ExpireMinZoom to ExpireMaxZoom
 	ExpireMaxZoom  int
@@ -44,17 +45,13 @@ func DefaultConfig() Config {
 		BatchSize:      1000,
 		MaxPoints:      1000,
 		MaxLength:      50000,
-		LowZoom:        8,
+		LowZooms:       []int{5, 8, 11},
+		LowMaxJump:     2000,
 		ExpireMinZoom:  0,
 		ExpireMaxZoom:  14,
 		MaxDeleteRatio: 0.5,
 		Log:            log.Default(),
 	}
-}
-
-// lowTolerance is the size of one pixel at LowZoom, for 256 px tiles.
-func (c Config) lowTolerance() float64 {
-	return 2 * mercMax / (256 * float64(int(1)<<c.LowZoom))
 }
 
 // Stats is the result of one run.
@@ -92,6 +89,9 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 			rd.DumpTime.Format(time.RFC3339), last.Format(time.RFC3339))
 	}
 
+	if err := EnsureLowTables(ctx, conn, cfg.LowZooms); err != nil {
+		return st, err
+	}
 	// id -> seen in this dump
 	ids, err := loadIDs(ctx, conn)
 	if err != nil {
@@ -108,7 +108,7 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 		}
 	}
 
-	split := SplitConfig{MaxPoints: cfg.MaxPoints, MaxLength: cfg.MaxLength, LowTolerance: cfg.lowTolerance()}
+	split := cfg.split()
 	skipGeom := func(id int64) bool { _, ok := ids[id]; return ok }
 	b := &batch{}
 	total := 0
@@ -193,11 +193,83 @@ func loadIDs(ctx context.Context, conn *pgx.Conn) (map[int64]bool, error) {
 	return ids, err
 }
 
-var traceTables = []string{"trace_segments", "trace_segments_low", "trace_tags", "traces"}
+func (c Config) split() SplitConfig {
+	return SplitConfig{MaxPoints: c.MaxPoints, MaxLength: c.MaxLength, LowZooms: c.LowZooms, LowMaxJump: c.LowMaxJump}
+}
+
+// LowTable is the name of the simplified copy for a low zoom.
+func LowTable(z int) string {
+	return fmt.Sprintf("trace_segments_z%d", z)
+}
+
+// LowZooms returns the zooms of the simplified copies in the database.
+func LowZooms(ctx context.Context, conn *pgx.Conn) ([]int, error) {
+	rows, err := conn.Query(ctx, `SELECT substr(table_name, 17)::int FROM information_schema.tables
+		WHERE table_schema = current_schema() AND table_name ~ '^trace_segments_z[0-9]+$' ORDER BY 1`)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[int])
+}
+
+// EnsureLowTables creates the simplified copies for zooms. When the
+// database already has traces with other copies, it is an error: the
+// copies are only filled when a trace is loaded, so a new import is needed.
+func EnsureLowTables(ctx context.Context, conn *pgx.Conn, zooms []int) error {
+	have, err := LowZooms(ctx, conn)
+	if err != nil {
+		return err
+	}
+	want := slices.Clone(zooms)
+	slices.Sort(want)
+	if len(have) > 0 && !slices.Equal(have, want) {
+		var n int
+		if err := conn.QueryRow(ctx, "SELECT count(*) FROM traces").Scan(&n); err != nil {
+			return err
+		}
+		if n > 0 {
+			return fmt.Errorf("the database has the low zoom tables for zooms %v, not %v; drop the tables and import again", have, want)
+		}
+	}
+	for _, z := range zooms {
+		if z < 0 || z > 20 {
+			return fmt.Errorf("low zoom %d is out of range", z)
+		}
+		err := execMulti(ctx, conn.PgConn(), fmt.Sprintf(`
+			CREATE TABLE IF NOT EXISTS %[1]s (
+				gpx_id  bigint,
+				trackid int,
+				geom    geometry(MultiLineString, 3857),
+				PRIMARY KEY (gpx_id, trackid)
+			);
+			CREATE INDEX IF NOT EXISTS %[1]s_geom_idx ON %[1]s USING gist (geom)`, LowTable(z)))
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// traceTables returns the tables with rows per trace, for deleteTraces.
+func traceTables(ctx context.Context, conn *pgx.Conn) ([]string, error) {
+	zooms, err := LowZooms(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	t := []string{"trace_segments"}
+	for _, z := range zooms {
+		t = append(t, LowTable(z))
+	}
+	return append(t, "trace_tags", "traces"), nil
+}
 
 // deleteTraces deletes the traces in groups. The geometry is read before
 // the delete, to know which tiles to expire.
 func deleteTraces(ctx context.Context, conn *pgx.Conn, ids []int64, exp *Expire) (int, error) {
+	tables, err := traceTables(ctx, conn)
+	if err != nil {
+		return 0, err
+	}
 	slices.Sort(ids)
 	const group = 1000
 	for i := 0; i < len(ids); i += group {
@@ -226,7 +298,7 @@ func deleteTraces(ctx context.Context, conn *pgx.Conn, ids []int64, exp *Expire)
 				return i, err
 			}
 		}
-		for _, t := range traceTables {
+		for _, t := range tables {
 			if _, err := tx.Exec(ctx, "DELETE FROM "+t+" WHERE gpx_id = ANY($1)", part); err != nil {
 				tx.Rollback(ctx)
 				return i, err
@@ -241,9 +313,10 @@ func deleteTraces(ctx context.Context, conn *pgx.Conn, ids []int64, exp *Expire)
 
 // batch keeps the rows of many traces as COPY text, until flush.
 type batch struct {
-	count                       int
-	traces, tags, segments, low bytes.Buffer
-	updTraces, updTags          bytes.Buffer
+	count                  int
+	traces, tags, segments bytes.Buffer
+	low                    map[int]*bytes.Buffer // per low zoom
+	updTraces, updTags     bytes.Buffer
 }
 
 func (b *batch) addNew(t *Trace, cfg SplitConfig, exp *Expire) int {
@@ -259,8 +332,14 @@ func (b *batch) addNew(t *Trace, cfg SplitConfig, exp *Expire) int {
 			exp.AddLine(l.Points)
 			n++
 		}
-		if len(low) > 0 {
-			fmt.Fprintf(&b.low, "%d\t%d\t%s\n", t.ID, trackid, hex.EncodeToString(EWKBMultiLineString(low)))
+		for z, parts := range low {
+			if b.low == nil {
+				b.low = map[int]*bytes.Buffer{}
+			}
+			if b.low[z] == nil {
+				b.low[z] = &bytes.Buffer{}
+			}
+			fmt.Fprintf(b.low[z], "%d\t%d\t%s\n", t.ID, trackid, hex.EncodeToString(EWKBMultiLineString(parts)))
 		}
 	}
 	return n
@@ -327,8 +406,10 @@ func (b *batch) flush(ctx context.Context, conn *pgx.Conn, exp *Expire) error {
 	if err := copyIn("trace_segments (gpx_id, trackid, segment, geom, started_at, ended_at)", &b.segments); err != nil {
 		return err
 	}
-	if err := copyIn("trace_segments_low (gpx_id, trackid, geom)", &b.low); err != nil {
-		return err
+	for z, buf := range b.low {
+		if err := copyIn(LowTable(z)+" (gpx_id, trackid, geom)", buf); err != nil {
+			return err
+		}
 	}
 
 	if b.updTraces.Len() > 0 {

@@ -30,19 +30,32 @@ type Line struct {
 
 // SplitConfig says how to cut a <trkseg> into lines.
 type SplitConfig struct {
-	MaxPoints    int     // cut after this many points
-	MaxLength    float64 // or after this many meters
-	LowTolerance float64 // simplify tolerance for trace_segments_low, in meters
+	MaxPoints  int     // cut after this many points
+	MaxLength  float64 // or after this many meters
+	LowZooms   []int   // one simplified copy per zoom, for trace_segments_z<N>
+	LowMaxJump float64 // the simplified copies are cut at edges longer than this, in meters (0: never)
+}
+
+// LowTolerance is the size of one pixel at zoom z, for 256 px tiles: the
+// simplify tolerance of trace_segments_z<z>.
+func LowTolerance(z int) float64 {
+	return 2 * mercMax / (256 * float64(int(1)<<z))
 }
 
 // BuildTrack turns the points of one <trkseg> into:
 //   - lines: the rows for trace_segments
-//   - low: the parts of the simplified MultiLineString for trace_segments_low
+//   - low: per low zoom, the parts of the simplified MultiLineString for
+//     trace_segments_z<zoom>
 //
 // The track is cut at ±180°. Each piece is then cut every MaxPoints points
 // or MaxLength meters, and the border point is repeated in the next line.
 // Pieces with less than 2 points are dropped.
-func BuildTrack(pts []Point, cfg SplitConfig) (lines []Line, low [][]XY) {
+//
+// For low, the piece is also cut at GPS jumps (edges longer than
+// LowMaxJump), so a jump never shows at low zooms. The lines keep the jumps:
+// serve draws them dimmer, like the current tiles.
+func BuildTrack(pts []Point, cfg SplitConfig) (lines []Line, low map[int][][]XY) {
+	low = map[int][][]XY{}
 	valid := make([]Point, 0, len(pts))
 	for _, p := range pts {
 		if validPoint(p) {
@@ -54,9 +67,13 @@ func BuildTrack(pts []Point, cfg SplitConfig) (lines []Line, low [][]XY) {
 			continue
 		}
 		lines = append(lines, chunk(piece, cfg.MaxPoints, cfg.MaxLength)...)
-		s := Simplify(project(piece), cfg.LowTolerance)
-		if len(s) >= 2 {
-			low = append(low, s)
+		for _, part := range splitJumps(piece, cfg.LowMaxJump) {
+			xy := project(part)
+			for _, z := range cfg.LowZooms {
+				if s := Simplify(xy, LowTolerance(z)); len(s) >= 2 {
+					low[z] = append(low[z], s)
+				}
+			}
 		}
 	}
 	return lines, low
@@ -91,6 +108,28 @@ func splitDateline(pts []Point) [][]Point {
 	}
 	if len(cur) > 0 {
 		out = append(out, cur)
+	}
+	return out
+}
+
+// splitJumps cuts the points at edges longer than maxJump meters. The edge
+// itself is dropped.
+func splitJumps(pts []Point, maxJump float64) [][]Point {
+	if maxJump <= 0 {
+		return [][]Point{pts}
+	}
+	var out [][]Point
+	start := 0
+	for i := 1; i < len(pts); i++ {
+		if haversine(pts[i-1], pts[i]) > maxJump {
+			if i-start >= 2 {
+				out = append(out, pts[start:i])
+			}
+			start = i
+		}
+	}
+	if len(pts)-start >= 2 {
+		out = append(out, pts[start:])
 	}
 	return out
 }

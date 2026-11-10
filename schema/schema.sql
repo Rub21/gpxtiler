@@ -23,14 +23,8 @@ CREATE TABLE IF NOT EXISTS trace_segments (
     PRIMARY KEY (gpx_id, trackid, segment)
 );
 
--- Simplified copy for low zooms. One row per trackid. It is a
--- MultiLineString because a track that crosses ±180° has more than one part.
-CREATE TABLE IF NOT EXISTS trace_segments_low (
-    gpx_id  bigint,
-    trackid int,
-    geom    geometry(MultiLineString, 3857),
-    PRIMARY KEY (gpx_id, trackid)
-);
+-- The simplified copies for the low zooms, trace_segments_z<N>, are created
+-- by import (see importer.EnsureLowTables).
 
 -- Only one row: the <time> of the last dump that was fully loaded.
 CREATE TABLE IF NOT EXISTS dump_state (
@@ -39,7 +33,6 @@ CREATE TABLE IF NOT EXISTS dump_state (
 );
 
 CREATE INDEX IF NOT EXISTS trace_segments_geom_idx ON trace_segments USING gist (geom);
-CREATE INDEX IF NOT EXISTS trace_segments_low_geom_idx ON trace_segments_low USING gist (geom);
 
 -- Only one row: the last trace id checked by "update --rss".
 CREATE TABLE IF NOT EXISTS rss_state (

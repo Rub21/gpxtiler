@@ -94,7 +94,7 @@ const dump2 = `
   <trkseg><trkpt lat="47.20" lon="9.50"><time>2020-01-01T00:00:00Z</time></trkpt>
    <trkpt lat="47.21" lon="9.51"/><trkpt lat="47.22" lon="9.52"><time>2020-01-01T00:10:00Z</time></trkpt></trkseg></trk>
  <trk><osm:id>10</osm:id>
-  <trkseg><trkpt lat="10" lon="179.5"/><trkpt lat="10" lon="-179.5"/></trkseg></trk>
+  <trkseg><trkpt lat="10" lon="179.995"/><trkpt lat="10" lon="-179.995"/></trkseg></trk>
 `
 
 func TestImportSync(t *testing.T) {
@@ -119,7 +119,7 @@ func TestImportSync(t *testing.T) {
 	if n := count(t, conn, "SELECT count(*) FROM traces"); n != 4 {
 		t.Errorf("traces = %d", n)
 	}
-	if n := count(t, conn, "SELECT count(*) FROM trace_segments_low"); n != 1 {
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments_z8"); n != 1 {
 		t.Errorf("low = %d", n)
 	}
 	var name, desc string
@@ -169,7 +169,10 @@ func TestImportSync(t *testing.T) {
 	if n := count(t, conn, "SELECT count(*) FROM trace_segments WHERE gpx_id = 10"); n != 2 {
 		t.Errorf("trace 10 should be cut at the date line, got %d lines", n)
 	}
-	if n := count(t, conn, "SELECT count(*) FROM trace_segments_low WHERE gpx_id = 10 AND ST_NumGeometries(geom) = 2"); n != 1 {
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments_z8 WHERE gpx_id = 10 AND ST_NumGeometries(geom) = 2"); n != 1 {
+		t.Errorf("trace 10 low should have 2 parts")
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments_z5 WHERE gpx_id = 10 AND ST_NumGeometries(geom) = 2"); n != 1 {
 		t.Errorf("trace 10 low should have 2 parts")
 	}
 	if st.ExpireFile == "" || st.ExpireTiles == 0 {
@@ -194,7 +197,7 @@ func TestImportSync(t *testing.T) {
 	}
 
 	// A dump that would delete most traces stops before deleting.
-	only10 := `<trk><osm:id>10</osm:id><trkseg><trkpt lat="10" lon="179.5"/><trkpt lat="10" lon="-179.5"/></trkseg></trk>`
+	only10 := `<trk><osm:id>10</osm:id><trkseg><trkpt lat="10" lon="179.995"/><trkpt lat="10" lon="-179.995"/></trkseg></trk>`
 	if _, err := Run(ctx, conn, dump("2013-08-09T00:00:00Z", only10), cfg); err == nil || !strings.Contains(err.Error(), "would delete") {
 		t.Errorf("mass delete: err = %v", err)
 	}

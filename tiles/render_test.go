@@ -3,6 +3,7 @@ package tiles
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"image"
 	"image/png"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -81,8 +83,20 @@ const z16x, z16y = 34501, 23013
 
 func TestRender(t *testing.T) {
 	pool := testPool(t)
-	r := &Renderer{Pool: pool, LowZoom: 8, Colors: 64}
 	ctx := context.Background()
+	r := &Renderer{Pool: pool, Colors: 64}
+	if err := r.LoadLowZooms(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(r.LowZooms, []int{5, 8, 11}) {
+		t.Fatalf("low zooms = %v", r.LowZooms)
+	}
+	if tb, low := r.table(3); tb != "trace_segments_z5" || !low {
+		t.Errorf("z3 reads %s", tb)
+	}
+	if tb, low := r.table(12); tb != "trace_segments" || low {
+		t.Errorf("z12 reads %s", tb)
+	}
 
 	data, err := r.Render(ctx, 16, z16x, z16y)
 	if err != nil {
@@ -101,7 +115,7 @@ func TestRender(t *testing.T) {
 		t.Errorf("palette has %d colors, want at most 64", len(p.Palette))
 	}
 	// Full color when Colors is 0.
-	full, err := (&Renderer{Pool: pool, LowZoom: 8}).Render(ctx, 16, z16x, z16y)
+	full, err := (&Renderer{Pool: pool, LowZooms: r.LowZooms}).Render(ctx, 16, z16x, z16y)
 	if err != nil || len(full) <= len(data) {
 		t.Errorf("full color tile: %d bytes, paletted %d bytes, %v", len(full), len(data), err)
 	}
@@ -124,7 +138,7 @@ func TestRender(t *testing.T) {
 	if data, err := r.Render(ctx, 16, 0, 0); err != nil || data != nil {
 		t.Errorf("far tile: %d bytes, %v", len(data), err)
 	}
-	// Low zoom reads trace_segments_low.
+	// Low zoom reads a simplified copy.
 	if data, err := r.Render(ctx, 8, 134, 89); err != nil || data == nil {
 		t.Errorf("low zoom tile: %d bytes, %v", len(data), err)
 	}
@@ -138,13 +152,14 @@ func TestServer(t *testing.T) {
 	os.WriteFile(TilePath(dir, 2, 2, 1), []byte("disk tile"), 0o644)
 
 	s := &Server{
-		Renderer:    &Renderer{Pool: pool, LowZoom: 8},
-		MinLiveZoom: 6,
-		MaxZoom:     20,
-		TileDir:     dir,
-		MaxAge:      time.Hour,
-		Timeout:     10 * time.Second,
-		Log:         log.New(io.Discard, "", 0),
+		Renderer:  &Renderer{Pool: pool, LowZooms: []int{5, 8, 11}},
+		PreZoom:   5,
+		CacheZoom: 14,
+		MaxZoom:   20,
+		TileDir:   dir,
+		MaxAge:    time.Hour,
+		Timeout:   10 * time.Second,
+		Log:       log.New(io.Discard, "", 0),
 	}
 	srv := httptest.NewServer(s.Handler(2))
 	defer srv.Close()
@@ -182,6 +197,20 @@ func TestServer(t *testing.T) {
 	if resp, body := get("/lines/2/0/0.png"); resp.StatusCode != 200 || !bytes.Equal(body, s.empty) {
 		t.Errorf("missing disk tile should be empty")
 	}
+	// Cached zoom: drawn once, then read from disk. Empty tiles are not kept.
+	if _, err := os.Stat(TilePath(dir, 14, z16x/4, z16y/4)); err == nil {
+		t.Fatal("z14 tile should not be on disk yet")
+	}
+	_, body14 := get(fmt.Sprintf("/lines/14/%d/%d.png", z16x/4, z16y/4))
+	if cached := ReadTile(dir, 14, z16x/4, z16y/4); !bytes.Equal(cached, body14) {
+		t.Errorf("z14 tile not cached")
+	}
+	if ReadTile(dir, 14, 0, 0) != nil || ReadTile(dir, 16, z16x, z16y) != nil {
+		t.Errorf("empty or z16 tiles should not be cached")
+	}
+	if resp, _ := get("/lines/14/0/0.png"); resp.StatusCode != 200 {
+		t.Errorf("empty z14: %d", resp.StatusCode)
+	}
 	for _, bad := range []string{"/lines/21/0/0.png", "/lines/2/4/0.png", "/lines/a/0/0", "/lines/2/-1/0"} {
 		if resp, _ := get(bad); resp.StatusCode != 404 {
 			t.Errorf("%s: %d, want 404", bad, resp.StatusCode)
@@ -195,5 +224,56 @@ func TestServer(t *testing.T) {
 	}
 	if resp, _ := get("/health"); resp.StatusCode != 200 {
 		t.Errorf("health: %d", resp.StatusCode)
+	}
+}
+
+func TestGenerator(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	exp := t.TempDir()
+	r := &Renderer{Pool: pool, LowZooms: []int{5, 8, 11}}
+	g := &Generator{Renderer: r, TileDir: dir, PreZoom: 9, CacheZoom: 14, Workers: 2, Log: log.New(io.Discard, "", 0)}
+
+	// Pre-render zooms 0 to 9: the Vaduz trace is in one tile per zoom.
+	st, err := g.All(ctx, 0, 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Written != 10 {
+		t.Errorf("all: %+v, want 10 written", st)
+	}
+	if ReadTile(dir, 0, 0, 0) == nil || ReadTile(dir, 9, z16x>>7, z16y>>7) == nil {
+		t.Error("z0 or z9 tile missing")
+	}
+	if _, err := g.All(ctx, 0, 12); err == nil {
+		t.Error("max zoom above pre zoom should fail")
+	}
+
+	// Expire: a z9 tile with the trace is drawn again, a z12 tile is
+	// removed from the cache, z16 is ignored, z0 is below min zoom.
+	WriteTile(dir, 12, 1, 1, []byte("old cache"))
+	WriteTile(dir, 0, 0, 0, []byte("old z0"))
+	os.WriteFile(filepath.Join(exp, "expire-1.txt"), []byte(fmt.Sprintf("9/%d/%d\n12/1/1\n16/5/5\n0/0/0\n", z16x>>7, z16y>>7)), 0o644)
+	st, err = g.Expire(ctx, exp, 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Files != 1 || st.Drawn != 1 || st.Written != 1 || st.Deleted != 1 {
+		t.Errorf("expire: %+v", st)
+	}
+	if ReadTile(dir, 12, 1, 1) != nil {
+		t.Error("expired cache tile still there")
+	}
+	if string(ReadTile(dir, 0, 0, 0)) != "old z0" {
+		t.Error("z0 below min zoom was drawn")
+	}
+	if _, err := os.Stat(filepath.Join(exp, "expire-1.txt")); err == nil {
+		t.Error("expire file not removed")
+	}
+	// A bad line stops the run before any change.
+	os.WriteFile(filepath.Join(exp, "expire-2.txt"), []byte("9/x/y\n"), 0o644)
+	if _, err := g.Expire(ctx, exp, 0); err == nil {
+		t.Error("bad expire line should fail")
 	}
 }

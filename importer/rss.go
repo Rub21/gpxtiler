@@ -99,6 +99,9 @@ func RunRSS(ctx context.Context, conn *pgx.Conn, f *Fetcher, cfg Config, rc RSSC
 	to := min(max, last+int64(rc.MaxTraces))
 	cfg.Log.Printf("checking traces %d to %d (RSS %d)", last+1, to, max)
 
+	if err := EnsureLowTables(ctx, conn, cfg.LowZooms); err != nil {
+		return st, err
+	}
 	// Ids already loaded, for example by a newer dump.
 	loaded, err := loadIDRange(ctx, conn, last, to)
 	if err != nil {
@@ -111,7 +114,7 @@ func RunRSS(ctx context.Context, conn *pgx.Conn, f *Fetcher, cfg Config, rc RSSC
 			return st, err
 		}
 	}
-	split := SplitConfig{MaxPoints: cfg.MaxPoints, MaxLength: cfg.MaxLength, LowTolerance: cfg.lowTolerance()}
+	split := cfg.split()
 	b := &batch{}
 	done := last // all ids up to here are checked
 
