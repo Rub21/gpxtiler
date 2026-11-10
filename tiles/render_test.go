@@ -236,7 +236,7 @@ func TestGenerator(t *testing.T) {
 	dir := t.TempDir()
 	exp := t.TempDir()
 	r := &Renderer{Pool: pool, LowZooms: []int{5, 8, 11}}
-	g := &Generator{Renderer: r, TileDir: dir, PreZoom: 9, CacheZoom: 14, Workers: 2, Log: log.New(io.Discard, "", 0)}
+	g := &Generator{Renderer: r, TileDir: dir, Workers: 2, Log: log.New(io.Discard, "", 0)}
 
 	// Pre-render zooms 0 to 9: the Vaduz trace is in one tile per zoom.
 	st, err := g.All(ctx, 0, 9)
@@ -249,8 +249,15 @@ func TestGenerator(t *testing.T) {
 	if ReadTile(dir, 0, 0, 0) == nil || ReadTile(dir, 9, z16x>>7, z16y>>7) == nil {
 		t.Error("z0 or z9 tile missing")
 	}
-	if _, err := g.All(ctx, 0, 12); err == nil {
-		t.Error("max zoom above pre zoom should fail")
+	// Only a range: nothing below minZoom is drawn, but the empty branches
+	// are still skipped.
+	os.RemoveAll(dir)
+	st, err = g.All(ctx, 6, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Drawn == 0 || ReadTile(dir, 3, 4, 2) != nil || ReadTile(dir, 10, z16x/64, z16y/64) == nil {
+		t.Errorf("range render: %+v", st)
 	}
 
 	// Expire: a z9 tile with the trace is drawn again, a z12 tile is
@@ -258,7 +265,7 @@ func TestGenerator(t *testing.T) {
 	WriteTile(dir, 12, 1, 1, []byte("old cache"))
 	WriteTile(dir, 0, 0, 0, []byte("old z0"))
 	os.WriteFile(filepath.Join(exp, "expire-1.txt"), []byte(fmt.Sprintf("9/%d/%d\n12/1/1\n16/5/5\n0/0/0\n", z16x>>7, z16y>>7)), 0o644)
-	st, err = g.Expire(ctx, exp, 6)
+	st, err = g.Expire(ctx, exp, 6, 9, 14)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +283,7 @@ func TestGenerator(t *testing.T) {
 	}
 	// A bad line stops the run before any change.
 	os.WriteFile(filepath.Join(exp, "expire-2.txt"), []byte("9/x/y\n"), 0o644)
-	if _, err := g.Expire(ctx, exp, 0); err == nil {
+	if _, err := g.Expire(ctx, exp, 0, 9, 14); err == nil {
 		t.Error("bad expire line should fail")
 	}
 }

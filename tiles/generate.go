@@ -18,15 +18,13 @@ type Tile struct{ Z, X, Y int }
 
 func (t Tile) String() string { return fmt.Sprintf("%d/%d/%d", t.Z, t.X, t.Y) }
 
-// Generator writes the tiles on disk: the pre-rendered low zooms (up to
-// PreZoom) and the cache above them (up to CacheZoom).
+// Generator writes the tiles on disk, in advance (All) or when they
+// expire (Expire).
 type Generator struct {
-	Renderer  *Renderer
-	TileDir   string
-	PreZoom   int // tiles up to this zoom are pre-rendered
-	CacheZoom int // tiles from PreZoom+1 to this zoom are cached by serve
-	Workers   int
-	Log       *log.Logger
+	Renderer *Renderer
+	TileDir  string
+	Workers  int
+	Log      *log.Logger
 }
 
 // Stats is the result of one run.
@@ -37,25 +35,27 @@ type Stats struct {
 	Files   int // expire files read
 }
 
-// All draws every tile from zoom 0 to maxZoom that has lines, and writes
-// the ones from minZoom up. It walks the tiles as a quadtree: the children
-// of an empty tile are empty too, so they are skipped.
+// All draws and writes every tile from minZoom to maxZoom that has lines.
+// It walks the tiles as a quadtree: the children of an empty tile are
+// empty too, so they are skipped. Below minZoom the tiles are not drawn,
+// only checked for lines.
 func (g *Generator) All(ctx context.Context, minZoom, maxZoom int) (Stats, error) {
 	var st Stats
-	if maxZoom > g.PreZoom {
-		return st, fmt.Errorf("max zoom %d is above the pre-rendered zooms (%d)", maxZoom, g.PreZoom)
-	}
 	level := []Tile{{0, 0, 0}}
 	for z := 0; z <= maxZoom && len(level) > 0; z++ {
 		var next []Tile
 		var mu sync.Mutex
 		err := g.each(ctx, level, func(t Tile) error {
-			data, err := g.draw(ctx, &st, t, t.Z >= minZoom)
-			if err != nil {
-				return err
-			}
-			if data == nil {
-				return nil
+			if t.Z < minZoom {
+				has, err := g.Renderer.HasLines(ctx, t.Z, t.X, t.Y)
+				if err != nil || !has {
+					return err
+				}
+			} else {
+				data, err := g.draw(ctx, &st, t)
+				if err != nil || data == nil {
+					return err
+				}
 			}
 			mu.Lock()
 			for dy := 0; dy < 2; dy++ {
@@ -76,10 +76,10 @@ func (g *Generator) All(ctx context.Context, minZoom, maxZoom int) (Stats, error
 }
 
 // Expire reads the expire files in expireDir (in name order) and applies
-// them: tiles up to PreZoom and from minZoom up are drawn again, tiles
-// above PreZoom are removed from the cache. Each file is deleted after
-// its tiles are done.
-func (g *Generator) Expire(ctx context.Context, expireDir string, minZoom int) (Stats, error) {
+// them: the tiles from minZoom to maxZoom are drawn again, the tiles above
+// maxZoom up to cacheZoom are removed from disk, so serve draws them on
+// the next request. Each file is deleted after its tiles are done.
+func (g *Generator) Expire(ctx context.Context, expireDir string, minZoom, maxZoom, cacheZoom int) (Stats, error) {
 	var st Stats
 	files, err := filepath.Glob(filepath.Join(expireDir, "expire-*.txt"))
 	if err != nil {
@@ -95,7 +95,7 @@ func (g *Generator) Expire(ctx context.Context, expireDir string, minZoom int) (
 	st.Files = len(files)
 	var list []Tile
 	for t := range tiles {
-		if t.Z > g.CacheZoom || (t.Z <= g.PreZoom && t.Z < minZoom) {
+		if t.Z < minZoom || t.Z > cacheZoom {
 			continue
 		}
 		list = append(list, t)
@@ -110,14 +110,14 @@ func (g *Generator) Expire(ctx context.Context, expireDir string, minZoom int) (
 
 	var deleted atomic.Int64
 	err = g.each(ctx, list, func(t Tile) error {
-		if t.Z > g.PreZoom {
+		if t.Z > maxZoom {
 			was, err := DeleteTile(g.TileDir, t.Z, t.X, t.Y)
 			if was {
 				deleted.Add(1)
 			}
 			return err
 		}
-		_, err := g.draw(ctx, &st, t, true)
+		_, err := g.draw(ctx, &st, t)
 		return err
 	})
 	st.Deleted += int(deleted.Load())
@@ -132,17 +132,14 @@ func (g *Generator) Expire(ctx context.Context, expireDir string, minZoom int) (
 	return st, nil
 }
 
-// draw renders one tile. With write, the PNG goes to disk, or the old
-// file is removed when the tile is empty now.
-func (g *Generator) draw(ctx context.Context, st *Stats, t Tile, write bool) ([]byte, error) {
+// draw renders one tile and writes the PNG to disk, or removes the old
+// file when the tile is empty now.
+func (g *Generator) draw(ctx context.Context, st *Stats, t Tile) ([]byte, error) {
 	data, err := g.Renderer.Render(ctx, t.Z, t.X, t.Y)
 	if err != nil {
 		return nil, fmt.Errorf("tile %s: %w", t, err)
 	}
 	g.count(st, func() { st.Drawn++ })
-	if !write {
-		return data, nil
-	}
 	if data == nil {
 		was, err := DeleteTile(g.TileDir, t.Z, t.X, t.Y)
 		if was {

@@ -32,10 +32,10 @@ import (
 const usage = `usage:
   gpxtiler import [flags] FILE   load a GPX dump (.gpx, .gpx.bz2, .gpx.gz, an http(s) URL, or - for stdin)
   gpxtiler update -rss [flags]   load new traces from the website RSS feed
-  gpxtiler update -ids LIST      delete traces that are not in the id list, load the missing ones
+  gpxtiler update -ids URL       delete traces that are not in the id list, load the missing ones
   gpxtiler serve [flags]         serve the PNG tiles on /lines/{z}/{x}/{y}.png
-  gpxtiler render [flags]        apply the expire files to the tiles on disk; -all draws the low zooms
-  gpxtiler render                render low zoom tiles (not ready yet)
+  gpxtiler render -zooms 0-9     draw the tiles of these zooms to disk
+  gpxtiler render -expired -zooms 6-9   redraw the expired tiles of these zooms, remove the expired ones above
 
 Run "gpxtiler <command> -h" to see the flags.`
 
@@ -259,20 +259,19 @@ func runRender(args []string) error {
 	fs := flag.NewFlagSet("render", flag.ExitOnError)
 	db := fs.String("db", envOr("GPXTILER_DB", "postgres://localhost/gpxtiler"), "PostgreSQL connection string (env GPXTILER_DB)")
 	tileDir := fs.String("tile-dir", envOr("GPXTILER_TILE_DIR", ""), "folder with the tiles on disk (env GPXTILER_TILE_DIR)")
+	zooms := fs.String("zooms", "", "zooms to draw, like 0-9")
+	expired := fs.Bool("expired", false, "only the tiles in the expire files: redraw the ones in -zooms, remove the ones above (up to -cache-zoom) from disk")
 	expireDir := fs.String("expire-dir", envOr("GPXTILER_EXPIRE_DIR", ""), "folder with the expire files from import and update (env GPXTILER_EXPIRE_DIR)")
-	all := fs.Bool("all", false, "draw every tile with lines from -min-zoom to -max-zoom, instead of reading the expire files")
-	minZoom := fs.Int("min-zoom", 0, "lowest zoom to draw")
-	maxZoom := fs.Int("max-zoom", -1, "with -all: highest zoom to draw (default -pre-zoom)")
-	preZoom := fs.Int("pre-zoom", envInt("GPXTILER_PRE_ZOOM", 9), "tiles up to this zoom are drawn by -all and redrawn when expired (env GPXTILER_PRE_ZOOM)")
-	cacheZoom := fs.Int("cache-zoom", envInt("GPXTILER_CACHE_ZOOM", 14), "tiles above -pre-zoom up to this zoom are removed when expired, serve draws them again (env GPXTILER_CACHE_ZOOM)")
+	cacheZoom := fs.Int("cache-zoom", envInt("GPXTILER_CACHE_ZOOM", 14), "with -expired: highest zoom kept on disk by serve (env GPXTILER_CACHE_ZOOM)")
 	workers := fs.Int("workers", runtime.NumCPU(), "tiles drawn at the same time")
 	colors := fs.Int("colors", envInt("GPXTILER_COLORS", 64), "colors per PNG (env GPXTILER_COLORS)")
 	fs.Parse(args)
-	if fs.NArg() != 0 || *tileDir == "" || (!*all && *expireDir == "") {
-		return fmt.Errorf("render needs -tile-dir, and -expire-dir or -all\n\n%s", usage)
+	if fs.NArg() != 0 || *tileDir == "" || *zooms == "" || (*expired && *expireDir == "") {
+		return fmt.Errorf("render needs -tile-dir and -zooms, and -expire-dir with -expired\n\n%s", usage)
 	}
-	if *maxZoom < 0 {
-		*maxZoom = *preZoom
+	minZoom, maxZoom, err := parseRange(*zooms)
+	if err != nil {
+		return err
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -300,17 +299,32 @@ func runRender(args []string) error {
 	}
 	defer lock.Close()
 
-	g := &tiles.Generator{Renderer: rend, TileDir: *tileDir, PreZoom: *preZoom, CacheZoom: *cacheZoom, Workers: *workers, Log: log.Default()}
+	g := &tiles.Generator{Renderer: rend, TileDir: *tileDir, Workers: *workers, Log: log.Default()}
 	start := time.Now()
 	var st tiles.Stats
-	if *all {
-		st, err = g.All(ctx, *minZoom, *maxZoom)
+	if *expired {
+		st, err = g.Expire(ctx, *expireDir, minZoom, maxZoom, *cacheZoom)
 	} else {
-		st, err = g.Expire(ctx, *expireDir, *minZoom)
+		st, err = g.All(ctx, minZoom, maxZoom)
 	}
 	log.Printf("done in %s: %d expire files, %d tiles drawn, %d written, %d deleted",
 		time.Since(start).Round(time.Second), st.Files, st.Drawn, st.Written, st.Deleted)
 	return err
+}
+
+// parseRange reads "a-b" (or "a" for one zoom).
+func parseRange(s string) (min, max int, err error) {
+	lo, hi, _ := strings.Cut(s, "-")
+	if hi == "" {
+		hi = lo
+	}
+	if min, err = strconv.Atoi(lo); err == nil {
+		max, err = strconv.Atoi(hi)
+	}
+	if err != nil || min < 0 || max < min || max > 20 {
+		return 0, 0, fmt.Errorf("-zooms must be like 0-9, got %q", s)
+	}
+	return min, max, nil
 }
 
 func runImport(args []string) error {

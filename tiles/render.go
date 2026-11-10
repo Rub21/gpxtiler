@@ -85,6 +85,15 @@ func tileBounds(z, x, y int) (minx, maxy, size float64) {
 	return -mercMax + float64(x)*size, mercMax - float64(y)*size, size
 }
 
+// HasLines tells whether any line touches the tile. It only reads the
+// index, so it is much cheaper than drawing the tile.
+func (r *Renderer) HasLines(ctx context.Context, z, x, y int) (bool, error) {
+	table, _ := r.table(z)
+	var found bool
+	err := r.Pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM "+table+" WHERE geom && ST_TileEnvelope($1, $2, $3, margin => 1.0 / 256))", z, x, y).Scan(&found)
+	return found, err
+}
+
 // Render returns the PNG of one tile, or nil when the tile is empty.
 func (r *Renderer) Render(ctx context.Context, z, x, y int) ([]byte, error) {
 	c, err := r.Draw(ctx, z, x, y)
