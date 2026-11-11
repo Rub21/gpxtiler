@@ -2,7 +2,9 @@ package importer
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -22,35 +24,49 @@ type Expire struct {
 	maxZoom int
 	tiles   map[uint64]struct{} // key: zoom<<58 | x<<29 | y
 	pending []uint64
-	path    string // final path, without ".part"
+	path    string   // final path, without ".part"
+	copies  []string // the same file in the other folders
 	file    *os.File
 }
 
-// NewExpire prepares an expire file in dir. Leftover ".part" files from a
-// run that stopped are renamed to ".txt" first, so their tiles are not lost.
-func NewExpire(dir string, minZoom, maxZoom int, runTime time.Time) (*Expire, error) {
+// NewExpire prepares an expire file in dirs: one folder, or several
+// separated by commas, that get the same file (one per reader: the PNG
+// render and Tilekiln each delete the files they have applied). Leftover
+// ".part" files from a run that stopped are renamed to ".txt" first, so
+// their tiles are not lost.
+func NewExpire(dirs string, minZoom, maxZoom int, runTime time.Time) (*Expire, error) {
 	if minZoom < 0 || maxZoom < minZoom || maxZoom > 28 {
 		return nil, fmt.Errorf("expire zooms %d-%d are out of range", minZoom, maxZoom)
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
-	}
-	left, err := filepath.Glob(filepath.Join(dir, "*.txt.part"))
-	if err != nil {
-		return nil, err
-	}
-	for _, p := range left {
-		if err := os.Rename(p, strings.TrimSuffix(p, ".part")); err != nil {
+	name := "expire-" + runTime.UTC().Format("20060102T150405Z") + ".txt"
+	e := &Expire{minZoom: minZoom, maxZoom: maxZoom, tiles: map[uint64]struct{}{}}
+	for _, dir := range strings.Split(dirs, ",") {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
 		}
+		left, err := filepath.Glob(filepath.Join(dir, "*.txt.part"))
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range left {
+			if err := os.Rename(p, strings.TrimSuffix(p, ".part")); err != nil {
+				return nil, err
+			}
+		}
+		if e.path == "" {
+			e.path = filepath.Join(dir, name)
+		} else {
+			e.copies = append(e.copies, filepath.Join(dir, name))
+		}
 	}
-	name := "expire-" + runTime.UTC().Format("20060102T150405Z") + ".txt"
-	return &Expire{
-		minZoom: minZoom,
-		maxZoom: maxZoom,
-		tiles:   map[uint64]struct{}{},
-		path:    filepath.Join(dir, name),
-	}, nil
+	if e.path == "" {
+		return nil, errors.New("no expire folder")
+	}
+	return e, nil
 }
 
 // AddLine marks every tile the line goes through.
@@ -161,7 +177,32 @@ func (e *Expire) Close() (string, error) {
 		return "", err
 	}
 	e.file = nil
+	for _, c := range e.copies {
+		if err := copyFile(e.path+".part", c+".part"); err != nil {
+			return "", err
+		}
+		if err := os.Rename(c+".part", c); err != nil {
+			return "", err
+		}
+	}
 	return e.path, os.Rename(e.path+".part", e.path)
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // Count returns the number of tiles marked in this run, in all zooms.

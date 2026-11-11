@@ -71,7 +71,7 @@ func commonFlags(fs *flag.FlagSet, cfg *importer.Config) *string {
 	fs.IntVar(&cfg.MaxPoints, "max-points", cfg.MaxPoints, "cut lines after this many points")
 	fs.Float64Var(&cfg.MaxLength, "max-length", cfg.MaxLength, "cut lines after this many meters")
 	fs.Float64Var(&cfg.LowMaxJump, "low-max-jump", cfg.LowMaxJump, "cut the simplified copies at GPS jumps longer than this many meters, 0 to keep them")
-	fs.StringVar(&cfg.ExpireDir, "expire-dir", envOr("GPXTILER_EXPIRE_DIR", ""), "folder for expire files, empty to disable (env GPXTILER_EXPIRE_DIR)")
+	fs.StringVar(&cfg.ExpireDir, "expire-dir", envOr("GPXTILER_EXPIRE_DIR", ""), "folder for the expire files, or several separated by commas (one per reader), empty to disable (env GPXTILER_EXPIRE_DIR)")
 	fs.IntVar(&cfg.ExpireMinZoom, "expire-min-zoom", envInt("GPXTILER_EXPIRE_MIN_ZOOM", cfg.ExpireMinZoom), "lowest zoom in the expire files (env GPXTILER_EXPIRE_MIN_ZOOM)")
 	fs.IntVar(&cfg.ExpireMaxZoom, "expire-max-zoom", envInt("GPXTILER_EXPIRE_MAX_ZOOM", cfg.ExpireMaxZoom), "highest zoom in the expire files (env GPXTILER_EXPIRE_MAX_ZOOM)")
 	fs.DurationVar(&lockWait, "lock-wait", lockWait, "when another import or update is running, wait this long for it")

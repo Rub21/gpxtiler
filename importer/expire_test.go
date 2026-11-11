@@ -28,6 +28,24 @@ func TestExpireTiles(t *testing.T) {
 	}
 }
 
+func TestExpireTwoFolders(t *testing.T) {
+	a, b := t.TempDir(), t.TempDir()
+	e, err := NewExpire(a+","+b, 0, 2, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.AddLine([]XY{{0, 0}, {1000, 1000}})
+	path, err := e.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fa, _ := os.ReadFile(path)
+	fb, err := os.ReadFile(filepath.Join(b, filepath.Base(path)))
+	if err != nil || len(fa) == 0 || string(fa) != string(fb) {
+		t.Fatalf("second copy: %v, %q vs %q", err, fa, fb)
+	}
+}
+
 func TestExpireFile(t *testing.T) {
 	dir := t.TempDir()
 	// A leftover file from a run that stopped.
