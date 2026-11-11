@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -51,6 +53,7 @@ func (s *Server) Handler(maxRenders int) http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /lines/{z}/{x}/{y}", s.tile)
+	mux.HandleFunc("GET /traces/{id}", s.trace)
 	// A small map to look at the tiles.
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -121,6 +124,54 @@ func (s *Server) tile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", int(s.MaxAge.Seconds())))
 	w.Write(data)
+}
+
+// trace answers /traces/{id} with the lines of a trace as a GeoJSON
+// Feature (simplified to about a meter), so the viewer can draw them and
+// show what was loaded: 404 when the trace is not in the database.
+func (s *Server) trace(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "bad trace id", http.StatusNotFound)
+		return
+	}
+	var name *string
+	var segments int
+	var points int64
+	var geom *string
+	err = s.Renderer.Pool.QueryRow(r.Context(), `
+		SELECT t.name, count(s.geom), coalesce(sum(ST_NPoints(s.geom)), 0),
+		       ST_AsGeoJSON(ST_Multi(ST_SimplifyPreserveTopology(ST_Collect(ST_Transform(s.geom, 4326) ORDER BY s.trackid, s.segment), 0.00001)), 6)
+		FROM traces t
+		LEFT JOIN trace_segments s ON s.gpx_id = t.gpx_id
+		WHERE t.gpx_id = $1
+		GROUP BY t.gpx_id, t.name`, id).
+		Scan(&name, &segments, &points, &geom)
+	if errors.Is(err, pgx.ErrNoRows) {
+		http.Error(w, "trace not loaded", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		s.Log.Printf("trace %d: %v", id, err)
+		http.Error(w, "database error", http.StatusServiceUnavailable)
+		return
+	}
+	feature := struct {
+		Type       string          `json:"type"`
+		Properties map[string]any  `json:"properties"`
+		Geometry   json.RawMessage `json:"geometry"`
+	}{
+		Type:       "Feature",
+		Properties: map[string]any{"id": id, "name": name, "segments": segments, "points": points},
+		Geometry:   json.RawMessage("null"),
+	}
+	if geom != nil {
+		feature.Geometry = json.RawMessage(*geom)
+	}
+	w.Header().Set("Content-Type", "application/geo+json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(feature)
 }
 
 // draw renders a tile, waiting for a free slot. When the same tile is

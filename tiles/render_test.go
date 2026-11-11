@@ -228,6 +228,14 @@ func TestServer(t *testing.T) {
 	if resp, _ := get("/health"); resp.StatusCode != 200 {
 		t.Errorf("health: %d", resp.StatusCode)
 	}
+	// /traces/{id}: the trace of the fixture, and one that is not loaded.
+	resp, body = get("/traces/1")
+	if resp.StatusCode != 200 || !bytes.Contains(body, []byte(`"segments":`)) || !bytes.Contains(body, []byte(`"type":"MultiLineString"`)) {
+		t.Errorf("trace 1: %d %s", resp.StatusCode, body)
+	}
+	if resp, _ := get("/traces/999999"); resp.StatusCode != 404 {
+		t.Errorf("missing trace: %d, want 404", resp.StatusCode)
+	}
 }
 
 func TestGenerator(t *testing.T) {
