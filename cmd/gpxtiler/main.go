@@ -332,15 +332,15 @@ func runImport(args []string) error {
 	cfg := importer.DefaultConfig()
 	fs := flag.NewFlagSet("import", flag.ExitOnError)
 	db := commonFlags(fs, &cfg)
-	fs.Func("simplified-zooms", "zooms with a grid table of the lines (trace_grid_z<N>) for the low zoom tiles; update reads them from the database (env GPXTILER_SIMPLIFIED_ZOOMS, default 5,8,11,14)", func(s string) error {
+	fs.Func("grid-zooms", "zooms with a grid table of the lines (trace_grid_z<N>) for the low zoom tiles; update reads them from the database (env GPXTILER_GRID_ZOOMS, default 5,8,11,14)", func(s string) error {
 		var err error
 		cfg.LowZooms, err = parseZooms(s)
 		return err
 	})
-	if v := os.Getenv("GPXTILER_SIMPLIFIED_ZOOMS"); v != "" {
+	if v := os.Getenv("GPXTILER_GRID_ZOOMS"); v != "" {
 		var err error
 		if cfg.LowZooms, err = parseZooms(v); err != nil {
-			log.Fatalf("GPXTILER_SIMPLIFIED_ZOOMS: %v", err)
+			log.Fatalf("GPXTILER_GRID_ZOOMS: %v", err)
 		}
 	}
 	fs.Float64Var(&cfg.MaxDeleteRatio, "max-delete-ratio", cfg.MaxDeleteRatio, "stop if more than this share of traces would be deleted, 0 to disable")
