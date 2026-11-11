@@ -46,10 +46,10 @@ func jumpLength(z int) float64 {
 // Renderer draws PNG tiles from the trace tables.
 type Renderer struct {
 	Pool *pgxpool.Pool
-	// LowZooms: the zooms with a simplified copy of the lines
-	// (trace_segments_z<N>, made by import). A tile reads the copy of the
-	// lowest zoom that is not below its own; above the highest copy it
-	// reads trace_segments. Use LoadLowZooms to fill it from the database.
+	// LowZooms: the zooms with a grid table of the lines (trace_grid_z<N>,
+	// made by import). A tile reads the table of the lowest zoom that is
+	// not below its own; above the highest table it reads trace_segments.
+	// Use LoadLowZooms to fill it from the database.
 	LowZooms []int
 	// Colors: reduce each PNG to this many colors, like pngquant does for
 	// the current tiles (64). The file gets about 4 times smaller. 0 keeps
@@ -57,7 +57,7 @@ type Renderer struct {
 	Colors int
 }
 
-// LoadLowZooms reads from the database which simplified copies exist.
+// LoadLowZooms reads from the database which grid tables exist.
 func (r *Renderer) LoadLowZooms(ctx context.Context) error {
 	conn, err := r.Pool.Acquire(ctx)
 	if err != nil {
@@ -69,7 +69,7 @@ func (r *Renderer) LoadLowZooms(ctx context.Context) error {
 }
 
 // table returns the table to read for a tile zoom, and whether it is a
-// simplified copy.
+// grid table.
 func (r *Renderer) table(z int) (string, bool) {
 	for _, lz := range r.LowZooms { // sorted
 		if z <= lz {
@@ -128,9 +128,11 @@ func (r *Renderer) Draw(ctx context.Context, z, x, y int) (*Canvas, error) {
 	// edges and so their brightness. Import already cuts lines every 1000
 	// points or 50 km, so the rows are small.
 	table, low := r.table(z)
-	sql := "SELECT ST_AsBinary(geom) FROM " + table + " WHERE geom && ST_TileEnvelope($1, $2, $3, margin => 1.0 / 256)"
+	sql := "SELECT ST_AsBinary(geom), 1 FROM " + table + " WHERE geom && ST_TileEnvelope($1, $2, $3, margin => 1.0 / 256)"
 	if low {
-		sql = "SELECT ST_AsBinary((ST_Dump(geom)).geom) FROM " + table + " WHERE geom && ST_TileEnvelope($1, $2, $3, margin => 1.0 / 256)"
+		// A grid edge stands for n traces: drawn once with n times the
+		// brightness, the same as n lines on top of each other.
+		sql = "SELECT ST_AsBinary(geom), n FROM " + table + " WHERE geom && ST_TileEnvelope($1, $2, $3, margin => 1.0 / 256)"
 	}
 	rows, err := r.Pool.Query(ctx, sql, z, x, y)
 	if err != nil {
@@ -143,13 +145,14 @@ func (r *Renderer) Draw(ctx context.Context, z, x, y int) (*Canvas, error) {
 	bright := lineBright(z)
 	jump := jumpLength(z)
 	if low {
-		// The simplified copies are already cut at the GPS jumps, and their
-		// long edges come from the simplification, so nothing is dimmed.
+		// The grid tables are already cut at the GPS jumps, so nothing is
+		// dimmed.
 		jump = math.Inf(1)
 	}
 
 	var wkb []byte
-	_, err = pgx.ForEachRow(rows, []any{&wkb}, func() error {
+	var n int
+	_, err = pgx.ForEachRow(rows, []any{&wkb, &n}, func() error {
 		pts, err := importer.ParseWKBLineString(wkb)
 		if err != nil {
 			return err
@@ -160,7 +163,7 @@ func (r *Renderer) Draw(ctx context.Context, z, x, y int) (*Canvas, error) {
 			if dx == 0 && dy == 0 {
 				continue
 			}
-			br := bright
+			br := bright * float64(n)
 			if d := math.Hypot(dx, dy); d > jump {
 				br /= d / jump
 				if br < .0025 {

@@ -23,8 +23,8 @@ CREATE TABLE IF NOT EXISTS trace_segments (
     PRIMARY KEY (gpx_id, trackid, segment)
 );
 
--- The simplified copies for the low zooms, trace_segments_z<N>, are created
--- by import (see importer.EnsureLowTables).
+-- The grid tables for the low zooms, trace_grid_z<N>, are created by
+-- import (see importer.EnsureLowTables).
 
 -- Only one row: the <time> of the last dump that was fully loaded.
 CREATE TABLE IF NOT EXISTS dump_state (

@@ -24,12 +24,15 @@ import (
 	"github.com/Rub21/gpxtiler/schema"
 )
 
-// A trace in Vaduz going east, loaded with import.
+// A trace in Vaduz going east for 4.5 km, loaded with import. It is longer
+// than a cell of the z5 grid (4.9 km in Web Mercator), so every zoom
+// draws it, and its points are closer than -low-max-jump (2 km).
 const vaduz = `<?xml version="1.0" encoding="UTF-8"?>
 <gpx version="1.0" xmlns="http://www.topografix.com/GPX/1/0" xmlns:osm="https://www.openstreetmap.org/gpx/0.1">
  <time>2026-10-31T00:00:00Z</time>
  <trk><osm:id>1</osm:id><trkseg>
-  <trkpt lat="47.1400" lon="9.5200"/><trkpt lat="47.1400" lon="9.5210"/><trkpt lat="47.1400" lon="9.5220"/>
+  <trkpt lat="47.1400" lon="9.5200"/><trkpt lat="47.1400" lon="9.5350"/><trkpt lat="47.1400" lon="9.5500"/>
+  <trkpt lat="47.1400" lon="9.5650"/><trkpt lat="47.1400" lon="9.5800"/>
  </trkseg></trk>
 </gpx>
 `
@@ -88,14 +91,17 @@ func TestRender(t *testing.T) {
 	if err := r.LoadLowZooms(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(r.LowZooms, []int{5, 8, 11}) {
+	if !slices.Equal(r.LowZooms, []int{5, 8, 11, 14}) {
 		t.Fatalf("low zooms = %v", r.LowZooms)
 	}
-	if tb, low := r.table(3); tb != "trace_segments_z5" || !low {
+	if tb, low := r.table(3); tb != "trace_grid_z5" || !low {
 		t.Errorf("z3 reads %s", tb)
 	}
-	if tb, low := r.table(12); tb != "trace_segments" || low {
+	if tb, low := r.table(12); tb != "trace_grid_z14" || !low {
 		t.Errorf("z12 reads %s", tb)
+	}
+	if tb, low := r.table(15); tb != "trace_segments" || low {
+		t.Errorf("z15 reads %s", tb)
 	}
 
 	data, err := r.Render(ctx, 16, z16x, z16y)
@@ -138,9 +144,17 @@ func TestRender(t *testing.T) {
 	if data, err := r.Render(ctx, 16, 0, 0); err != nil || data != nil {
 		t.Errorf("far tile: %d bytes, %v", len(data), err)
 	}
-	// Low zoom reads a simplified copy.
+	// Low zoom reads a grid table.
 	if data, err := r.Render(ctx, 8, 134, 89); err != nil || data == nil {
 		t.Errorf("low zoom tile: %d bytes, %v", len(data), err)
+	}
+	// One trace: every grid row has n = 1, and the tile is drawn from them.
+	var n int
+	if err := pool.QueryRow(ctx, "SELECT max(n) FROM trace_grid_z14").Scan(&n); err != nil || n != 1 {
+		t.Errorf("grid n = %d, %v", n, err)
+	}
+	if data, err := r.Render(ctx, 12, z16x/16, z16y/16); err != nil || data == nil {
+		t.Errorf("z12 tile from the grid: %d bytes, %v", len(data), err)
 	}
 }
 

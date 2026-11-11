@@ -85,7 +85,7 @@ func RunIDs(ctx context.Context, conn *pgx.Conn, f *Fetcher, list []int64, cfg C
 		inList[id] = true
 		st.ListMax = max(st.ListMax, id)
 	}
-	// The simplified copies are the ones import made.
+	// The grid tables are the ones import made.
 	var err error
 	if cfg.LowZooms, err = LowZooms(ctx, conn); err != nil {
 		return st, err
@@ -126,7 +126,7 @@ func RunIDs(ctx context.Context, conn *pgx.Conn, f *Fetcher, list []int64, cfg C
 		}
 	}
 
-	if st.Deleted, err = deleteTraces(ctx, conn, gone, exp); err != nil {
+	if st.Deleted, err = deleteTraces(ctx, conn, gone, exp, cfg); err != nil {
 		return st, err
 	}
 

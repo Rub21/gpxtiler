@@ -119,8 +119,8 @@ func TestImportSync(t *testing.T) {
 	if n := count(t, conn, "SELECT count(*) FROM traces"); n != 4 {
 		t.Errorf("traces = %d", n)
 	}
-	if n := count(t, conn, "SELECT count(*) FROM trace_segments_z8"); n != 1 {
-		t.Errorf("low = %d", n)
+	if n := count(t, conn, "SELECT count(*) FROM trace_grid_z8"); n == 0 {
+		t.Error("no grid rows")
 	}
 	var name, desc string
 	conn.QueryRow(ctx, "SELECT name, description FROM traces WHERE gpx_id = 1").Scan(&name, &desc)
@@ -169,11 +169,16 @@ func TestImportSync(t *testing.T) {
 	if n := count(t, conn, "SELECT count(*) FROM trace_segments WHERE gpx_id = 10"); n != 2 {
 		t.Errorf("trace 10 should be cut at the date line, got %d lines", n)
 	}
-	if n := count(t, conn, "SELECT count(*) FROM trace_segments_z8 WHERE gpx_id = 10 AND ST_NumGeometries(geom) = 2"); n != 1 {
-		t.Errorf("trace 10 low should have 2 parts")
+	// Trace 10 is 1.1 km long: at z11 (76 m cells) it has edges on both
+	// sides of the date line, none across it.
+	if n := count(t, conn, "SELECT count(*) FROM trace_grid_z11 WHERE ST_XMax(geom) < -20030000"); n == 0 {
+		t.Error("trace 10 should have edges on the west side of the date line")
 	}
-	if n := count(t, conn, "SELECT count(*) FROM trace_segments_z5 WHERE gpx_id = 10 AND ST_NumGeometries(geom) = 2"); n != 1 {
-		t.Errorf("trace 10 low should have 2 parts")
+	if n := count(t, conn, "SELECT count(*) FROM trace_grid_z11 WHERE ST_XMin(geom) > 20030000"); n == 0 {
+		t.Error("trace 10 should have edges on the east side of the date line")
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_grid_z11 WHERE ST_XMin(geom) < 0 AND ST_XMax(geom) > 0"); n != 0 {
+		t.Errorf("%d edges cross the date line", n)
 	}
 	if st.ExpireFile == "" || st.ExpireTiles == 0 {
 		t.Fatalf("no expire file: %+v", st)
@@ -235,5 +240,44 @@ func TestImportKeepsNewerTraces(t *testing.T) {
 	}
 	if n := count(t, conn, "SELECT count(*) FROM traces WHERE gpx_id IN (1, 3, 10, 50)"); n != 4 {
 		t.Errorf("%d of 1, 3, 10, 50 left, want 4", n)
+	}
+}
+
+// Two traces on the same road share the grid rows; a delete takes them back.
+func TestGridCounts(t *testing.T) {
+	conn := testConn(t)
+	ctx := context.Background()
+	cfg := testConfig(t.TempDir())
+	road := `<trk><osm:id>%d</osm:id><trkseg><trkpt lat="47.10" lon="9.50"/><trkpt lat="47.10" lon="9.52"/><trkpt lat="47.10" lon="9.54"/></trkseg></trk>
+`
+	other := `<trk><osm:id>3</osm:id><trkseg><trkpt lat="47.30" lon="9.50"/><trkpt lat="47.30" lon="9.52"/></trkseg></trk>
+`
+	body := strings.Replace(road, "%d", "1", 1) + strings.Replace(road, "%d", "2", 1) + other
+	if _, err := Run(ctx, conn, dump("2026-10-01T00:00:00Z", body), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_grid_z11 WHERE n = 2"); n == 0 {
+		t.Error("the shared road should have rows with n = 2")
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_grid_z11 WHERE n NOT IN (1, 2)"); n != 0 {
+		t.Errorf("%d rows with a wrong n", n)
+	}
+	// Delete trace 2: the road stays with n = 1.
+	body = strings.Replace(road, "%d", "1", 1) + other
+	if _, err := Run(ctx, conn, dump("2026-10-02T00:00:00Z", body), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_grid_z11 WHERE n <> 1"); n != 0 {
+		t.Errorf("%d rows with n <> 1 after one delete", n)
+	}
+	// Delete trace 1 too: only the other trace is left.
+	if _, err := Run(ctx, conn, dump("2026-10-03T00:00:00Z", other), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_grid_z11 WHERE ST_YMin(geom) < 5970000"); n != 0 {
+		t.Errorf("%d rows of the road left after both deletes", n)
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_grid_z11"); n == 0 {
+		t.Error("the other trace should still have rows")
 	}
 }

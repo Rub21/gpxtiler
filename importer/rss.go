@@ -103,7 +103,7 @@ func RunRSS(ctx context.Context, conn *pgx.Conn, f *Fetcher, cfg Config, rc RSSC
 	to := min(max, last+int64(rc.MaxTraces))
 	cfg.Log.Printf("checking traces %d to %d (RSS %d)", last+1, to, max)
 
-	// The simplified copies are the ones import made.
+	// The grid tables are the ones import made.
 	if cfg.LowZooms, err = LowZooms(ctx, conn); err != nil {
 		return st, err
 	}

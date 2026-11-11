@@ -4,8 +4,8 @@ gpxtiler loads the OpenStreetMap GPS traces into PostGIS, keeps them up to date 
 
 
 ```sh
-# once: load the GPX dump, with a simplified copy of the lines for zoom 5, 8 and 11
-gpxtiler import -simplified-zooms 5,8,11 -expire-dir /data/expire gpx-latest.gpx.bz2
+# once: load the GPX dump, with a grid table of the lines for zoom 5, 8, 11 and 14
+gpxtiler import -simplified-zooms 5,8,11,14 -expire-dir /data/expire gpx-latest.gpx.bz2
 
 # every few minutes: new traces from the RSS feed of the website. The first run starts
 # after the highest id in the database; -start-id latest starts at the newest trace
@@ -31,7 +31,7 @@ gpxtiler render -expired -zooms 6-9 -expire-dir /data/expire -tile-dir /data/til
 
 ## How it works
 
-- `import` reads the GPX dump from [planet-dump-ng](https://github.com/zerebubuth/planet-dump-ng) (file, URL or `-` for stdin) and stores each trace as lines in PostGIS, plus a simplified copy per low zoom (`-simplified-zooms 5,8,11`), like Spyglass does.
+- `import` reads the GPX dump from [planet-dump-ng](https://github.com/zerebubuth/planet-dump-ng) (file, URL or `-` for stdin) and stores each trace as lines in PostGIS, plus a grid table per low zoom (`-simplified-zooms 5,8,11,14`).
 - `update -rss` reads the website RSS feed and downloads the new traces, like [gpx-updater](https://github.com/openstreetmap/gpx-updater) does today.
 - `update -ids` reads the daily list of identifiable trace ids (openstreetmap/chef#881), deletes the traces that are not in it and downloads the missing ones.
 - `serve` draws the tiles from PostGIS. The drawing is a port of [datamaps](https://github.com/ericfischer/datamaps), so the tiles look like gps-tile.openstreetmap.org: colors by direction, GPS jumps dimmed. `/` is a small map to look at them.
@@ -39,7 +39,7 @@ gpxtiler render -expired -zooms 6-9 -expire-dir /data/expire -tile-dir /data/til
 
 ## Two ideas to know
 
-**1. The lines are stored four times, with less detail each time.** `import -simplified-zooms 5,8,11` keeps the full lines in `trace_segments` and a simplified copy for zoom 11, 8 and 5 (`trace_segments_z11`, `_z8`, `_z5`); `update` fills the same copies: at zoom 5 a trace of 10,000 points is 20 pixels long, so the copy keeps about 20 points. A tile is always drawn from the copy closest to its zoom, so the low zooms do not read millions of points.
+**1. The low zooms read a grid, not the traces.** `import -simplified-zooms 5,8,11,14` keeps the full lines in `trace_segments` and, per zoom, a table `trace_grid_z<N>` where the world is a grid of one pixel at that zoom: one row per edge between two grid nodes, with `n`, how many traces go through it. Many traces on the same road share the rows, so the table grows with the roads that have GPS, not with the traces, and a tile of a busy city costs the same as one of the countryside. `update` adds 1 to the rows of a new trace and takes 1 back when a trace is deleted (`-low-max-jump` must stay the same, or the counts drift). A tile is always drawn from the table closest to its zoom. A trace shorter than one pixel at a zoom has no edge there, so it is not drawn at that zoom.
 
 **2. A tile is drawn once and kept on disk.** `serve` reads a tile from `-tile-dir`; when it is not there, it draws it and keeps it there if the zoom is 14 or less. Above that a tile is small and fast, so it is drawn on every request. A tile of zoom 0 to 9 covers a big area and is slow to draw, so `render -zooms 0-9` draws all of them in advance; without it, the first request of each one is slow.
 

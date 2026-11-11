@@ -115,41 +115,43 @@ func parseChunk(gpxStart, chunk []byte, skipGeom func(int64) bool) (*Trace, erro
 
 // parsed is one trace with its rows ready for COPY.
 type parsed struct {
-	t       *Trace
-	segRows []byte         // trace_segments rows
-	lowRows map[int][]byte // per low zoom, trace_segments_z<N> rows
-	lines   []Line         // for the expire file
-	n       int            // segments
+	t        *Trace
+	segRows  []byte         // trace_segments rows
+	gridRows map[int][]byte // per low zoom, trace_grid_z<N> rows (x0, y0, x1, y1)
+	lines    []Line         // for the expire file
+	n        int            // segments
 }
 
-// buildRows makes the rows of the lines of a trace.
+// buildRows makes the rows of the lines of a trace. The grid edges are
+// built from all the lines of the trace at once, so an edge that two
+// <trkseg> share counts once.
 func buildRows(t *Trace, cfg SplitConfig) *parsed {
 	p := &parsed{t: t}
 	var seg bytes.Buffer
-	low := map[int]*bytes.Buffer{}
 	for trackid, pts := range t.Segments {
-		lines, lowParts := BuildTrack(pts, cfg)
+		lines, _ := BuildTrack(pts, SplitConfig{MaxPoints: cfg.MaxPoints, MaxLength: cfg.MaxLength})
 		for i, l := range lines {
 			fmt.Fprintf(&seg, "%d\t%d\t%d\t%s\t%s\t%s\n", t.ID, trackid, i,
 				hex.EncodeToString(EWKBLineString(l.Points)), copyTime(l.Start), copyTime(l.End))
 			p.n++
 		}
 		p.lines = append(p.lines, lines...)
-		for z, parts := range lowParts {
-			if low[z] == nil {
-				low[z] = &bytes.Buffer{}
-			}
-			fmt.Fprintf(low[z], "%d\t%d\t%s\n", t.ID, trackid, hex.EncodeToString(EWKBMultiLineString(parts)))
-		}
 	}
 	p.segRows = seg.Bytes()
-	if len(low) > 0 {
-		p.lowRows = map[int][]byte{}
-		for z, b := range low {
-			p.lowRows[z] = b.Bytes()
-		}
+	p.gridRows = map[int][]byte{}
+	for z, edges := range GridEdges(p.lines, cfg.LowZooms, cfg.LowMaxJump) {
+		p.gridRows[z] = gridRows(edges)
 	}
 	return p
+}
+
+// gridRows writes edges as COPY text rows (x0, y0, x1, y1).
+func gridRows(edges []GridEdge) []byte {
+	var b bytes.Buffer
+	for _, e := range edges {
+		fmt.Fprintf(&b, "%d\t%d\t%d\t%d\n", e.X0, e.Y0, e.X1, e.Y1)
+	}
+	return b.Bytes()
 }
 
 // parseAll reads the traces of ds with workers goroutines and sends them
