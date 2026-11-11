@@ -107,6 +107,9 @@ func RunRSS(ctx context.Context, conn *pgx.Conn, f *Fetcher, cfg Config, rc RSSC
 	if cfg.LowZooms, err = LowZooms(ctx, conn); err != nil {
 		return st, err
 	}
+	if err := checkGrid(ctx, conn, cfg.LowZooms); err != nil {
+		return st, err
+	}
 	// Ids already loaded, for example by a newer dump.
 	loaded, err := loadIDRange(ctx, conn, last, to)
 	if err != nil {

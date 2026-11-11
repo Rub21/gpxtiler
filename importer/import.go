@@ -94,6 +94,9 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 	if err := EnsureLowTables(ctx, conn, cfg.LowZooms); err != nil {
 		return st, err
 	}
+	if err := checkGrid(ctx, conn, cfg.LowZooms); err != nil {
+		return st, err
+	}
 	// id -> seen in this dump
 	ids, err := loadIDs(ctx, conn)
 	if err != nil {
@@ -101,6 +104,15 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 	}
 	existing := len(ids)
 	cfg.Log.Printf("dump time %s, %d traces in the database", rd.DumpTime.Format(time.RFC3339), existing)
+
+	// An empty database is a bulk load: indexes at the end (see bulk.go).
+	bulk := st.FirstLoad && existing == 0
+	if bulk {
+		cfg.Log.Printf("empty database: bulk load, the indexes are created at the end")
+		if err := bulkStart(ctx, conn, cfg.LowZooms); err != nil {
+			return st, err
+		}
+	}
 
 	// The first load writes no expire file, the first render is complete.
 	var exp *Expire
@@ -134,7 +146,7 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 		return st, err
 	}
 
-	b := &batch{}
+	b := &batch{bulk: bulk}
 	total := 0
 	var dumpMax int64 // highest trace id in the dump
 	for p := range parsedCh {
@@ -169,6 +181,11 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 	}
 	if err := b.flush(ctx, conn, exp); err != nil {
 		return st, err
+	}
+	if bulk {
+		if err := bulkFinish(ctx, conn, cfg.LowZooms, cfg.Log); err != nil {
+			return st, err
+		}
 	}
 
 	if total == 0 && existing > 0 {
@@ -356,14 +373,12 @@ func gridAdd(ctx context.Context, pg *pgconn.PgConn, z int, rows []byte) error {
 	if _, err := pg.CopyFrom(ctx, bytes.NewReader(rows), "COPY grid_in FROM STDIN"); err != nil {
 		return fmt.Errorf("copy %s: %w", table, err)
 	}
-	cell := strconv.FormatFloat(LowTolerance(z), 'g', -1, 64)
 	return execMulti(ctx, pg, fmt.Sprintf(`
 		INSERT INTO %[1]s (x0, y0, x1, y1, n, geom)
-		SELECT x0, y0, x1, y1, count(*),
-		       ST_SetSRID(ST_MakeLine(ST_MakePoint(x0 * %[2]s, y0 * %[2]s), ST_MakePoint(x1 * %[2]s, y1 * %[2]s)), 3857)
+		SELECT x0, y0, x1, y1, count(*), %[2]s
 		  FROM grid_in GROUP BY 1, 2, 3, 4
 		ON CONFLICT (x0, y0, x1, y1) DO UPDATE SET n = %[1]s.n + EXCLUDED.n;
-		DROP TABLE grid_in`, table, cell))
+		DROP TABLE grid_in`, table, gridGeomSQL(z)))
 }
 
 // gridRemove takes edges (COPY text rows) back from the grid table of
@@ -393,6 +408,7 @@ type batch struct {
 	traces, tags, segments bytes.Buffer
 	grid                   map[int]*bytes.Buffer // per low zoom, trace_grid_z<N> rows
 	updTraces, updTags     bytes.Buffer
+	bulk                   bool // first load: the edges go to grid_raw_z<N> (see bulk.go)
 }
 
 func (b *batch) addNew(t *Trace, cfg SplitConfig, exp *Expire) int {
@@ -482,6 +498,12 @@ func (b *batch) flush(ctx context.Context, conn *pgx.Conn, exp *Expire) error {
 		return err
 	}
 	for z, buf := range b.grid {
+		if b.bulk {
+			if err := copyIn(rawTable(z)+" (x0, y0, x1, y1)", buf); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := gridAdd(ctx, pg, z, buf.Bytes()); err != nil {
 			return err
 		}
@@ -519,7 +541,7 @@ func (b *batch) flush(ctx context.Context, conn *pgx.Conn, exp *Expire) error {
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	*b = batch{}
+	*b = batch{bulk: b.bulk}
 	return nil
 }
 

@@ -90,6 +90,9 @@ func RunIDs(ctx context.Context, conn *pgx.Conn, f *Fetcher, list []int64, cfg C
 	if cfg.LowZooms, err = LowZooms(ctx, conn); err != nil {
 		return st, err
 	}
+	if err := checkGrid(ctx, conn, cfg.LowZooms); err != nil {
+		return st, err
+	}
 	dbIDs, err := loadIDs(ctx, conn)
 	if err != nil {
 		return st, err
