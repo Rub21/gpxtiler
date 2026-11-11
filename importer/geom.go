@@ -32,30 +32,29 @@ type Line struct {
 type SplitConfig struct {
 	MaxPoints  int     // cut after this many points
 	MaxLength  float64 // or after this many meters
-	LowZooms   []int   // one simplified copy per zoom, for trace_segments_z<N>
-	LowMaxJump float64 // the simplified copies are cut at edges longer than this, in meters (0: never)
+	LowZooms   []int   // one grid table per zoom, trace_grid_z<N>
+	LowMaxJump float64 // the grid edges are cut at edges longer than this, in meters (0: never)
 }
 
 // LowTolerance is the size of one pixel at zoom z, for 256 px tiles: the
-// simplify tolerance of trace_segments_z<z>.
+// cell of the grid of trace_grid_z<z>.
 func LowTolerance(z int) float64 {
 	return 2 * mercMax / (256 * float64(int(1)<<z))
 }
 
+// GridEdge is one edge of trace_grid_z<N>: two nodes of the grid, in cells
+// from the origin of Web Mercator. The edge has a direction: a -> b and
+// b -> a are two edges.
+type GridEdge struct{ X0, Y0, X1, Y1 int32 }
+
 // BuildTrack turns the points of one <trkseg> into:
 //   - lines: the rows for trace_segments
-//   - low: per low zoom, the parts of the simplified MultiLineString for
-//     trace_segments_z<zoom>
+//   - grid: per low zoom, the edges for trace_grid_z<zoom> (see GridEdges)
 //
 // The track is cut at ±180°. Each piece is then cut every MaxPoints points
 // or MaxLength meters, and the border point is repeated in the next line.
 // Pieces with less than 2 points are dropped.
-//
-// For low, the piece is also cut at GPS jumps (edges longer than
-// LowMaxJump), so a jump never shows at low zooms. The lines keep the jumps:
-// serve draws them dimmer, like the current tiles.
-func BuildTrack(pts []Point, cfg SplitConfig) (lines []Line, low map[int][][]XY) {
-	low = map[int][][]XY{}
+func BuildTrack(pts []Point, cfg SplitConfig) (lines []Line, grid map[int][]GridEdge) {
 	valid := make([]Point, 0, len(pts))
 	for _, p := range pts {
 		if validPoint(p) {
@@ -67,16 +66,52 @@ func BuildTrack(pts []Point, cfg SplitConfig) (lines []Line, low map[int][][]XY)
 			continue
 		}
 		lines = append(lines, chunk(piece, cfg.MaxPoints, cfg.MaxLength)...)
-		for _, part := range splitJumps(piece, cfg.LowMaxJump) {
-			xy := project(part)
-			for _, z := range cfg.LowZooms {
-				if s := Simplify(xy, LowTolerance(z)); len(s) >= 2 {
-					low[z] = append(low[z], s)
+	}
+	return lines, GridEdges(lines, cfg.LowZooms, cfg.LowMaxJump)
+}
+
+// GridEdges turns the lines of one trace into grid edges, per low zoom.
+// Each line is cut at GPS jumps longer than maxJump meters (0: never), so
+// a jump never shows at low zooms. Every point is moved to the nearest
+// node of the grid of one pixel at the zoom, and the edges go between
+// the nodes that follow each other. The points are not simplified first:
+// two traces on the same road must give the same edges, and a simplify
+// would join them in different ways. An edge is returned once per trace,
+// so the count in the table is a count of traces.
+//
+// The lines are the rows of trace_segments, so a delete can build the
+// same edges again from the database.
+func GridEdges(lines []Line, zooms []int, maxJump float64) map[int][]GridEdge {
+	out := make(map[int][]GridEdge, len(zooms))
+	for _, z := range zooms {
+		cell := LowTolerance(z)
+		seen := map[GridEdge]struct{}{}
+		edges := []GridEdge{}
+		for _, l := range lines {
+			for _, part := range splitJumpsXY(l.Points, maxJump) {
+				px, py := gridNode(part[0], cell)
+				for _, p := range part[1:] {
+					x, y := gridNode(p, cell)
+					if x == px && y == py {
+						continue
+					}
+					e := GridEdge{px, py, x, y}
+					if _, dup := seen[e]; !dup {
+						seen[e] = struct{}{}
+						edges = append(edges, e)
+					}
+					px, py = x, y
 				}
 			}
 		}
+		out[z] = edges
 	}
-	return lines, low
+	return out
+}
+
+// gridNode is the nearest grid node of a point.
+func gridNode(p XY, cell float64) (int32, int32) {
+	return int32(math.Round(p[0] / cell)), int32(math.Round(p[1] / cell))
 }
 
 func validPoint(p Point) bool {
@@ -112,16 +147,16 @@ func splitDateline(pts []Point) [][]Point {
 	return out
 }
 
-// splitJumps cuts the points at edges longer than maxJump meters. The edge
-// itself is dropped.
-func splitJumps(pts []Point, maxJump float64) [][]Point {
+// splitJumpsXY cuts Web Mercator points at edges longer than maxJump
+// meters on the ground. The edge itself is dropped.
+func splitJumpsXY(pts []XY, maxJump float64) [][]XY {
 	if maxJump <= 0 {
-		return [][]Point{pts}
+		return [][]XY{pts}
 	}
-	var out [][]Point
+	var out [][]XY
 	start := 0
 	for i := 1; i < len(pts); i++ {
-		if haversine(pts[i-1], pts[i]) > maxJump {
+		if groundDist(pts[i-1], pts[i]) > maxJump {
 			if i-start >= 2 {
 				out = append(out, pts[start:i])
 			}
@@ -132,6 +167,13 @@ func splitJumps(pts []Point, maxJump float64) [][]Point {
 		out = append(out, pts[start:])
 	}
 	return out
+}
+
+// groundDist is the distance in meters between two Web Mercator points,
+// corrected for the scale of the projection at their latitude.
+func groundDist(a, b XY) float64 {
+	lat := 2*math.Atan(math.Exp((a[1]+b[1])/2/earthRadius)) - math.Pi/2
+	return math.Hypot(b[0]-a[0], b[1]-a[1]) * math.Cos(lat)
 }
 
 func chunk(pts []Point, maxPoints int, maxLength float64) []Line {

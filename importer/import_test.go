@@ -119,8 +119,8 @@ func TestImportSync(t *testing.T) {
 	if n := count(t, conn, "SELECT count(*) FROM traces"); n != 4 {
 		t.Errorf("traces = %d", n)
 	}
-	if n := count(t, conn, "SELECT count(*) FROM trace_segments_z8"); n != 1 {
-		t.Errorf("low = %d", n)
+	if n := count(t, conn, "SELECT count(*) FROM trace_grid_z8"); n == 0 {
+		t.Error("no grid rows")
 	}
 	var name, desc string
 	conn.QueryRow(ctx, "SELECT name, description FROM traces WHERE gpx_id = 1").Scan(&name, &desc)
@@ -169,11 +169,16 @@ func TestImportSync(t *testing.T) {
 	if n := count(t, conn, "SELECT count(*) FROM trace_segments WHERE gpx_id = 10"); n != 2 {
 		t.Errorf("trace 10 should be cut at the date line, got %d lines", n)
 	}
-	if n := count(t, conn, "SELECT count(*) FROM trace_segments_z8 WHERE gpx_id = 10 AND ST_NumGeometries(geom) = 2"); n != 1 {
-		t.Errorf("trace 10 low should have 2 parts")
+	// Trace 10 is 1.1 km long: at z11 (76 m cells) it has edges on both
+	// sides of the date line, none across it.
+	if n := count(t, conn, "SELECT count(*) FROM trace_grid_z11 WHERE ST_XMax(geom) < -20030000"); n == 0 {
+		t.Error("trace 10 should have edges on the west side of the date line")
 	}
-	if n := count(t, conn, "SELECT count(*) FROM trace_segments_z5 WHERE gpx_id = 10 AND ST_NumGeometries(geom) = 2"); n != 1 {
-		t.Errorf("trace 10 low should have 2 parts")
+	if n := count(t, conn, "SELECT count(*) FROM trace_grid_z11 WHERE ST_XMin(geom) > 20030000"); n == 0 {
+		t.Error("trace 10 should have edges on the east side of the date line")
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_grid_z11 WHERE ST_XMin(geom) < 0 AND ST_XMax(geom) > 0"); n != 0 {
+		t.Errorf("%d edges cross the date line", n)
 	}
 	if st.ExpireFile == "" || st.ExpireTiles == 0 {
 		t.Fatalf("no expire file: %+v", st)
@@ -235,5 +240,111 @@ func TestImportKeepsNewerTraces(t *testing.T) {
 	}
 	if n := count(t, conn, "SELECT count(*) FROM traces WHERE gpx_id IN (1, 3, 10, 50)"); n != 4 {
 		t.Errorf("%d of 1, 3, 10, 50 left, want 4", n)
+	}
+}
+
+// Two traces on the same road share the grid rows; a delete takes them back.
+func TestGridCounts(t *testing.T) {
+	conn := testConn(t)
+	ctx := context.Background()
+	cfg := testConfig(t.TempDir())
+	road := `<trk><osm:id>%d</osm:id><trkseg><trkpt lat="47.10" lon="9.50"/><trkpt lat="47.10" lon="9.52"/><trkpt lat="47.10" lon="9.54"/></trkseg></trk>
+`
+	other := `<trk><osm:id>3</osm:id><trkseg><trkpt lat="47.30" lon="9.50"/><trkpt lat="47.30" lon="9.52"/></trkseg></trk>
+`
+	body := strings.Replace(road, "%d", "1", 1) + strings.Replace(road, "%d", "2", 1) + other
+	if _, err := Run(ctx, conn, dump("2026-10-01T00:00:00Z", body), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_grid_z11 WHERE n = 2"); n == 0 {
+		t.Error("the shared road should have rows with n = 2")
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_grid_z11 WHERE n NOT IN (1, 2)"); n != 0 {
+		t.Errorf("%d rows with a wrong n", n)
+	}
+	// Delete trace 2: the road stays with n = 1.
+	body = strings.Replace(road, "%d", "1", 1) + other
+	if _, err := Run(ctx, conn, dump("2026-10-02T00:00:00Z", body), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_grid_z11 WHERE n <> 1"); n != 0 {
+		t.Errorf("%d rows with n <> 1 after one delete", n)
+	}
+	// Delete trace 1 too: only the other trace is left.
+	if _, err := Run(ctx, conn, dump("2026-10-03T00:00:00Z", other), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_grid_z11 WHERE ST_YMin(geom) < 5970000"); n != 0 {
+		t.Errorf("%d rows of the road left after both deletes", n)
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_grid_z11"); n == 0 {
+		t.Error("the other trace should still have rows")
+	}
+}
+
+// gridDump reads a grid table as text, to compare two loads.
+func gridDump(t *testing.T, conn *pgx.Conn, table string) []string {
+	t.Helper()
+	rows, err := conn.Query(context.Background(), "SELECT concat_ws(' ', x0, y0, x1, y1, n, ST_AsText(geom)) FROM "+table+" ORDER BY x0, y0, x1, y1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// The bulk first load gives the same grid as adding the traces one batch
+// at a time with ON CONFLICT, and leaves the indexes in place.
+func TestBulkLoadMatchesNormal(t *testing.T) {
+	ctx := context.Background()
+	road := `<trk><osm:id>%d</osm:id><trkseg><trkpt lat="47.10" lon="9.50"/><trkpt lat="47.10" lon="9.52"/><trkpt lat="47.11" lon="9.54"/><trkpt lat="47.10" lon="9.52"/></trkseg></trk>
+`
+	trace := func(id int) string { return strings.Replace(road, "%d", strconv.Itoa(id), 1) }
+
+	// Bulk: the three traces in the first load.
+	conn := testConn(t)
+	cfg := testConfig(t.TempDir())
+	if _, err := Run(ctx, conn, dump("2026-10-01T00:00:00Z", trace(1)+trace(2)+trace(3)), cfg); err != nil {
+		t.Fatal(err)
+	}
+	bulk := map[int][]string{}
+	for _, z := range cfg.LowZooms {
+		bulk[z] = gridDump(t, conn, LowTable(z))
+	}
+	for _, idx := range []string{"trace_grid_z11_pkey", "trace_grid_z11_geom_idx", "trace_segments_geom_idx"} {
+		if n := count(t, conn, "SELECT count(*) FROM pg_indexes WHERE schemaname = current_schema() AND indexname = $1", idx); n != 1 {
+			t.Errorf("index %s missing after the bulk load", idx)
+		}
+	}
+	if n := count(t, conn, "SELECT count(*) FROM pg_tables WHERE schemaname = current_schema() AND tablename LIKE 'grid_raw_%'"); n != 0 {
+		t.Errorf("%d raw tables left", n)
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_grid_z11 WHERE n = 3"); n == 0 {
+		t.Error("the shared road should have n = 3")
+	}
+
+	// Normal: trace 1 first (a bulk load of one), then 2 and 3 with ON CONFLICT.
+	conn = testConn(t)
+	if _, err := Run(ctx, conn, dump("2026-10-01T00:00:00Z", trace(1)), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(ctx, conn, dump("2026-10-02T00:00:00Z", trace(1)+trace(2)+trace(3)), cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, z := range cfg.LowZooms {
+		if got := gridDump(t, conn, LowTable(z)); !slices.Equal(got, bulk[z]) {
+			t.Errorf("z%d: normal load\n%v\nbulk load\n%v", z, got, bulk[z])
+		}
+	}
+
+	// A bulk load that stopped in the middle is found by the next run.
+	if _, err := conn.Exec(ctx, "ALTER TABLE trace_grid_z11 DROP CONSTRAINT trace_grid_z11_pkey"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(ctx, conn, dump("2026-10-03T00:00:00Z", trace(1)), cfg); err == nil || !strings.Contains(err.Error(), "did not finish") {
+		t.Errorf("unfinished load: err = %v", err)
 	}
 }

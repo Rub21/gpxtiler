@@ -30,8 +30,8 @@ type Config struct {
 	BatchSize      int     // traces per transaction
 	MaxPoints      int     // cut lines after this many points
 	MaxLength      float64 // or after this many meters
-	LowZooms       []int   // simplified copies trace_segments_z<N>, one per zoom, for the low zoom tiles
-	LowMaxJump     float64 // the simplified copies are cut at edges longer than this many meters
+	LowZooms       []int   // grid tables trace_grid_z<N>, one per zoom, for the low zoom tiles
+	LowMaxJump     float64 // the grid edges are cut at GPS jumps longer than this many meters
 	ExpireDir      string  // "" disables expire files
 	ExpireMinZoom  int     // expire files have the tiles from ExpireMinZoom to ExpireMaxZoom
 	ExpireMaxZoom  int
@@ -46,7 +46,7 @@ func DefaultConfig() Config {
 		BatchSize:      1000,
 		MaxPoints:      1000,
 		MaxLength:      50000,
-		LowZooms:       []int{5, 8, 11},
+		LowZooms:       []int{5, 8, 11, 14},
 		LowMaxJump:     2000,
 		ExpireMinZoom:  0,
 		ExpireMaxZoom:  14,
@@ -94,6 +94,9 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 	if err := EnsureLowTables(ctx, conn, cfg.LowZooms); err != nil {
 		return st, err
 	}
+	if err := checkGrid(ctx, conn, cfg.LowZooms); err != nil {
+		return st, err
+	}
 	// id -> seen in this dump
 	ids, err := loadIDs(ctx, conn)
 	if err != nil {
@@ -101,6 +104,15 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 	}
 	existing := len(ids)
 	cfg.Log.Printf("dump time %s, %d traces in the database", rd.DumpTime.Format(time.RFC3339), existing)
+
+	// An empty database is a bulk load: indexes at the end (see bulk.go).
+	bulk := st.FirstLoad && existing == 0
+	if bulk {
+		cfg.Log.Printf("empty database: bulk load, the indexes are created at the end")
+		if err := bulkStart(ctx, conn, cfg.LowZooms); err != nil {
+			return st, err
+		}
+	}
 
 	// The first load writes no expire file, the first render is complete.
 	var exp *Expire
@@ -134,7 +146,7 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 		return st, err
 	}
 
-	b := &batch{}
+	b := &batch{bulk: bulk}
 	total := 0
 	var dumpMax int64 // highest trace id in the dump
 	for p := range parsedCh {
@@ -170,6 +182,11 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 	if err := b.flush(ctx, conn, exp); err != nil {
 		return st, err
 	}
+	if bulk {
+		if err := bulkFinish(ctx, conn, cfg.LowZooms, cfg.Log); err != nil {
+			return st, err
+		}
+	}
 
 	if total == 0 && existing > 0 {
 		return st, errors.New("the dump has no traces; check the dump")
@@ -187,7 +204,7 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 		return st, fmt.Errorf("the dump would delete %d of %d traces; check the dump or raise -max-delete-ratio",
 			len(gone), existing)
 	}
-	if st.Deleted, err = deleteTraces(ctx, conn, gone, exp); err != nil {
+	if st.Deleted, err = deleteTraces(ctx, conn, gone, exp, cfg); err != nil {
 		return st, err
 	}
 
@@ -219,24 +236,24 @@ func (c Config) split() SplitConfig {
 	return SplitConfig{MaxPoints: c.MaxPoints, MaxLength: c.MaxLength, LowZooms: c.LowZooms, LowMaxJump: c.LowMaxJump}
 }
 
-// LowTable is the name of the simplified copy for a low zoom.
+// LowTable is the name of the grid table for a low zoom.
 func LowTable(z int) string {
-	return fmt.Sprintf("trace_segments_z%d", z)
+	return fmt.Sprintf("trace_grid_z%d", z)
 }
 
-// LowZooms returns the zooms of the simplified copies in the database.
+// LowZooms returns the zooms of the grid tables in the database.
 func LowZooms(ctx context.Context, conn *pgx.Conn) ([]int, error) {
-	rows, err := conn.Query(ctx, `SELECT substr(table_name, 17)::int FROM information_schema.tables
-		WHERE table_schema = current_schema() AND table_name ~ '^trace_segments_z[0-9]+$' ORDER BY 1`)
+	rows, err := conn.Query(ctx, `SELECT substr(table_name, 13)::int FROM information_schema.tables
+		WHERE table_schema = current_schema() AND table_name ~ '^trace_grid_z[0-9]+$' ORDER BY 1`)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, pgx.RowTo[int])
 }
 
-// EnsureLowTables creates the simplified copies for zooms. When the
-// database already has traces with other copies, it is an error: the
-// copies are only filled when a trace is loaded, so a new import is needed.
+// EnsureLowTables creates the grid tables for zooms. When the database
+// already has traces with other tables, it is an error: the tables are
+// only filled when a trace is loaded, so a new import is needed.
 func EnsureLowTables(ctx context.Context, conn *pgx.Conn, zooms []int) error {
 	have, err := LowZooms(ctx, conn)
 	if err != nil {
@@ -259,10 +276,13 @@ func EnsureLowTables(ctx context.Context, conn *pgx.Conn, zooms []int) error {
 		}
 		err := execMulti(ctx, conn.PgConn(), fmt.Sprintf(`
 			CREATE TABLE IF NOT EXISTS %[1]s (
-				gpx_id  bigint,
-				trackid int,
-				geom    geometry(MultiLineString, 3857),
-				PRIMARY KEY (gpx_id, trackid)
+				x0   int NOT NULL,
+				y0   int NOT NULL,
+				x1   int NOT NULL,
+				y1   int NOT NULL,
+				n    int NOT NULL,
+				geom geometry(LineString, 3857) NOT NULL,
+				PRIMARY KEY (x0, y0, x1, y1)
 			);
 			CREATE INDEX IF NOT EXISTS %[1]s_geom_idx ON %[1]s USING gist (geom)`, LowTable(z)))
 		if err != nil {
@@ -272,23 +292,14 @@ func EnsureLowTables(ctx context.Context, conn *pgx.Conn, zooms []int) error {
 	return nil
 }
 
-// traceTables returns the tables with rows per trace, for deleteTraces.
-func traceTables(ctx context.Context, conn *pgx.Conn) ([]string, error) {
-	zooms, err := LowZooms(ctx, conn)
-	if err != nil {
-		return nil, err
-	}
-	t := []string{"trace_segments"}
-	for _, z := range zooms {
-		t = append(t, LowTable(z))
-	}
-	return append(t, "trace_tags", "traces"), nil
-}
+// traceTables are the tables with rows per trace, for deleteTraces.
+var traceTables = []string{"trace_segments", "trace_tags", "traces"}
 
-// deleteTraces deletes the traces in groups. The geometry is read before
-// the delete, to know which tiles to expire.
-func deleteTraces(ctx context.Context, conn *pgx.Conn, ids []int64, exp *Expire) (int, error) {
-	tables, err := traceTables(ctx, conn)
+// deleteTraces deletes the traces in groups. The lines are read before
+// the delete, to know which tiles to expire and which grid edges to take
+// back (built again with the same cut as the insert: cfg.LowMaxJump).
+func deleteTraces(ctx context.Context, conn *pgx.Conn, ids []int64, exp *Expire, cfg Config) (int, error) {
+	zooms, err := LowZooms(ctx, conn)
 	if err != nil {
 		return 0, err
 	}
@@ -300,27 +311,43 @@ func deleteTraces(ctx context.Context, conn *pgx.Conn, ids []int64, exp *Expire)
 		if err != nil {
 			return i, err
 		}
-		if exp != nil {
-			rows, err := tx.Query(ctx, "SELECT ST_AsBinary(geom) FROM trace_segments WHERE gpx_id = ANY($1)", part)
-			if err != nil {
-				tx.Rollback(ctx)
-				return i, err
+		rows, err := tx.Query(ctx, "SELECT gpx_id, ST_AsBinary(geom) FROM trace_segments WHERE gpx_id = ANY($1) ORDER BY gpx_id, trackid, segment", part)
+		if err != nil {
+			tx.Rollback(ctx)
+			return i, err
+		}
+		lines := map[int64][]Line{}
+		var id int64
+		var wkb []byte
+		_, err = pgx.ForEachRow(rows, []any{&id, &wkb}, func() error {
+			pts, err := ParseWKBLineString(wkb)
+			exp.AddLine(pts)
+			lines[id] = append(lines[id], Line{Points: pts})
+			return err
+		})
+		if err == nil {
+			err = exp.Flush()
+		}
+		if err != nil {
+			tx.Rollback(ctx)
+			return i, err
+		}
+		gone := map[int]*bytes.Buffer{}
+		for _, l := range lines {
+			for z, edges := range GridEdges(l, zooms, cfg.LowMaxJump) {
+				if gone[z] == nil {
+					gone[z] = &bytes.Buffer{}
+				}
+				gone[z].Write(gridRows(edges))
 			}
-			var wkb []byte
-			_, err = pgx.ForEachRow(rows, []any{&wkb}, func() error {
-				pts, err := ParseWKBLineString(wkb)
-				exp.AddLine(pts)
-				return err
-			})
-			if err == nil {
-				err = exp.Flush()
-			}
-			if err != nil {
+		}
+		for z, buf := range gone {
+			if err := gridRemove(ctx, tx.Conn().PgConn(), z, buf.Bytes()); err != nil {
 				tx.Rollback(ctx)
 				return i, err
 			}
 		}
-		for _, t := range tables {
+		for _, t := range traceTables {
 			if _, err := tx.Exec(ctx, "DELETE FROM "+t+" WHERE gpx_id = ANY($1)", part); err != nil {
 				tx.Rollback(ctx)
 				return i, err
@@ -333,12 +360,55 @@ func deleteTraces(ctx context.Context, conn *pgx.Conn, ids []int64, exp *Expire)
 	return len(ids), nil
 }
 
+// gridAdd adds edges (COPY text rows) to the grid table of zoom z: a new
+// row gets n = 1, a known row n + 1. It runs inside a transaction.
+func gridAdd(ctx context.Context, pg *pgconn.PgConn, z int, rows []byte) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	table := LowTable(z)
+	if err := execMulti(ctx, pg, "CREATE TEMP TABLE grid_in (x0 int, y0 int, x1 int, y1 int) ON COMMIT DROP"); err != nil {
+		return err
+	}
+	if _, err := pg.CopyFrom(ctx, bytes.NewReader(rows), "COPY grid_in FROM STDIN"); err != nil {
+		return fmt.Errorf("copy %s: %w", table, err)
+	}
+	return execMulti(ctx, pg, fmt.Sprintf(`
+		INSERT INTO %[1]s (x0, y0, x1, y1, n, geom)
+		SELECT x0, y0, x1, y1, count(*), %[2]s
+		  FROM grid_in GROUP BY 1, 2, 3, 4
+		ON CONFLICT (x0, y0, x1, y1) DO UPDATE SET n = %[1]s.n + EXCLUDED.n;
+		DROP TABLE grid_in`, table, gridGeomSQL(z)))
+}
+
+// gridRemove takes edges (COPY text rows) back from the grid table of
+// zoom z. A row that reaches 0 is deleted. It runs inside a transaction.
+func gridRemove(ctx context.Context, pg *pgconn.PgConn, z int, rows []byte) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	table := LowTable(z)
+	if err := execMulti(ctx, pg, "CREATE TEMP TABLE grid_del (x0 int, y0 int, x1 int, y1 int) ON COMMIT DROP"); err != nil {
+		return err
+	}
+	if _, err := pg.CopyFrom(ctx, bytes.NewReader(rows), "COPY grid_del FROM STDIN"); err != nil {
+		return fmt.Errorf("copy %s: %w", table, err)
+	}
+	return execMulti(ctx, pg, fmt.Sprintf(`
+		UPDATE %[1]s g SET n = g.n - d.c
+		  FROM (SELECT x0, y0, x1, y1, count(*) AS c FROM grid_del GROUP BY 1, 2, 3, 4) d
+		 WHERE g.x0 = d.x0 AND g.y0 = d.y0 AND g.x1 = d.x1 AND g.y1 = d.y1;
+		DELETE FROM %[1]s WHERE n <= 0;
+		DROP TABLE grid_del`, table))
+}
+
 // batch keeps the rows of many traces as COPY text, until flush.
 type batch struct {
 	count                  int
 	traces, tags, segments bytes.Buffer
-	low                    map[int]*bytes.Buffer // per low zoom
+	grid                   map[int]*bytes.Buffer // per low zoom, trace_grid_z<N> rows
 	updTraces, updTags     bytes.Buffer
+	bulk                   bool // first load: the edges go to grid_raw_z<N> (see bulk.go)
 }
 
 func (b *batch) addNew(t *Trace, cfg SplitConfig, exp *Expire) int {
@@ -354,14 +424,14 @@ func (b *batch) addParsed(p *parsed, exp *Expire) int {
 	for _, l := range p.lines {
 		exp.AddLine(l.Points)
 	}
-	for z, rows := range p.lowRows {
-		if b.low == nil {
-			b.low = map[int]*bytes.Buffer{}
+	for z, rows := range p.gridRows {
+		if b.grid == nil {
+			b.grid = map[int]*bytes.Buffer{}
 		}
-		if b.low[z] == nil {
-			b.low[z] = &bytes.Buffer{}
+		if b.grid[z] == nil {
+			b.grid[z] = &bytes.Buffer{}
 		}
-		b.low[z].Write(rows)
+		b.grid[z].Write(rows)
 	}
 	return p.n
 }
@@ -427,8 +497,14 @@ func (b *batch) flush(ctx context.Context, conn *pgx.Conn, exp *Expire) error {
 	if err := copyIn("trace_segments (gpx_id, trackid, segment, geom, started_at, ended_at)", &b.segments); err != nil {
 		return err
 	}
-	for z, buf := range b.low {
-		if err := copyIn(LowTable(z)+" (gpx_id, trackid, geom)", buf); err != nil {
+	for z, buf := range b.grid {
+		if b.bulk {
+			if err := copyIn(rawTable(z)+" (x0, y0, x1, y1)", buf); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := gridAdd(ctx, pg, z, buf.Bytes()); err != nil {
 			return err
 		}
 	}
@@ -465,7 +541,7 @@ func (b *batch) flush(ctx context.Context, conn *pgx.Conn, exp *Expire) error {
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	*b = batch{}
+	*b = batch{bulk: b.bulk}
 	return nil
 }
 
