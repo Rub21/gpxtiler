@@ -237,3 +237,52 @@ func TestImportKeepsNewerTraces(t *testing.T) {
 		t.Errorf("%d of 1, 3, 10, 50 left, want 4", n)
 	}
 }
+
+// The bulk first load gives the same rows as a normal load, and leaves the
+// spatial indexes in place.
+func TestBulkLoadMatchesNormal(t *testing.T) {
+	ctx := context.Background()
+	road := `<trk><osm:id>%d</osm:id><trkseg><trkpt lat="47.10" lon="9.50"/><trkpt lat="47.10" lon="9.52"/><trkpt lat="47.11" lon="9.54"/></trkseg></trk>
+`
+	trace := func(id int) string { return strings.Replace(road, "%d", strconv.Itoa(id), 1) }
+	tables := []string{"trace_segments", "trace_segments_z5", "trace_segments_z8", "trace_segments_z11"}
+	read := func(conn *pgx.Conn, table string) []string {
+		rows, err := conn.Query(ctx, "SELECT concat_ws(' ', gpx_id, trackid, ST_AsText(geom)) FROM "+table+" ORDER BY 1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	// Bulk: the three traces in the first load.
+	conn := testConn(t)
+	cfg := testConfig(t.TempDir())
+	if _, err := Run(ctx, conn, dump("2026-10-01T00:00:00Z", trace(1)+trace(2)+trace(3)), cfg); err != nil {
+		t.Fatal(err)
+	}
+	bulk := map[string][]string{}
+	for _, tb := range tables {
+		bulk[tb] = read(conn, tb)
+		if n := count(t, conn, "SELECT count(*) FROM pg_indexes WHERE schemaname = current_schema() AND indexname = $1", tb+"_geom_idx"); n != 1 {
+			t.Errorf("index %s_geom_idx missing after the bulk load", tb)
+		}
+	}
+
+	// Normal: trace 1 first, then 2 and 3 into a database that has traces.
+	conn = testConn(t)
+	if _, err := Run(ctx, conn, dump("2026-10-01T00:00:00Z", trace(1)), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(ctx, conn, dump("2026-10-02T00:00:00Z", trace(1)+trace(2)+trace(3)), cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, tb := range tables {
+		if got := read(conn, tb); !slices.Equal(got, bulk[tb]) {
+			t.Errorf("%s: normal load %v, bulk load %v", tb, got, bulk[tb])
+		}
+	}
+}
