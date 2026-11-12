@@ -102,6 +102,15 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 	existing := len(ids)
 	cfg.Log.Printf("dump time %s, %d traces in the database", rd.DumpTime.Format(time.RFC3339), existing)
 
+	// An empty database is a bulk load: gist indexes at the end (see bulk.go).
+	bulk := st.FirstLoad && existing == 0
+	if bulk {
+		cfg.Log.Printf("empty database: bulk load, the spatial indexes are created at the end")
+		if err := bulkStart(ctx, conn, cfg.LowZooms); err != nil {
+			return st, err
+		}
+	}
+
 	// The first load writes no expire file, the first render is complete.
 	var exp *Expire
 	if !st.FirstLoad && cfg.ExpireDir != "" {
@@ -169,6 +178,11 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 	}
 	if err := b.flush(ctx, conn, exp); err != nil {
 		return st, err
+	}
+	if bulk {
+		if err := bulkFinish(ctx, conn, cfg.LowZooms, cfg.Log); err != nil {
+			return st, err
+		}
 	}
 
 	if total == 0 && existing > 0 {
