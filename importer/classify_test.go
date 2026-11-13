@@ -5,29 +5,6 @@ import (
 	"time"
 )
 
-func TestNeedsUpload(t *testing.T) {
-	now := time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC)
-	ok := pathAt(3, 10, time.Second, time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC))
-	noTime := pathAt(3, 10, time.Second, time.Time{})
-	bad := pathAt(3, 10, time.Second, time.Unix(0, 0).UTC())
-	cases := []struct {
-		name string
-		segs [][]Point
-		want bool
-	}{
-		{"all valid", [][]Point{ok, ok}, false},
-		{"one segment without time", [][]Point{ok, noTime}, true},
-		{"one segment with 1970", [][]Point{bad}, true},
-		{"empty segment is skipped", [][]Point{ok, {}}, false},
-		{"no segments", nil, false},
-	}
-	for _, c := range cases {
-		if got := needsUpload(c.segs, now); got != c.want {
-			t.Errorf("%s: needsUpload = %v, want %v", c.name, got, c.want)
-		}
-	}
-}
-
 var uploaded = time.Date(2020, 6, 1, 12, 0, 0, 0, time.UTC)
 
 // pathAt makes n points along the equator, step meters apart, with one
@@ -42,6 +19,12 @@ func pathAt(n int, step float64, every time.Duration, t0 time.Time) []Point {
 		}
 	}
 	return pts
+}
+
+// modeOf is the mode of one segment, like BuildTrack does it.
+func modeOf(pts []Point) Mode {
+	m, _ := modeOfSpeeds(edgeSpeeds(pts, uploaded), DefaultModeSpeeds())
+	return m
 }
 
 func TestYearOf(t *testing.T) {
@@ -83,7 +66,7 @@ func TestModeOf(t *testing.T) {
 		{"bad time", pathAt(10, 25, time.Second, time.Unix(0, 0).UTC()), ModeUnknown},
 	}
 	for _, c := range cases {
-		if got := ModeOf(c.pts, uploaded); got != c.want {
+		if got := modeOf(c.pts); got != c.want {
 			t.Errorf("%s: mode = %d, want %d", c.name, got, c.want)
 		}
 	}
@@ -94,7 +77,7 @@ func TestModeOfIgnoresJump(t *testing.T) {
 	t0 := time.Date(2020, 5, 1, 0, 0, 0, 0, time.UTC)
 	pts := pathAt(10, 1.39, time.Second, t0)
 	pts[5].Lon += 0.05 // 5 km away, for one second
-	if got := ModeOf(pts, uploaded); got != ModeWalk {
+	if got := modeOf(pts); got != ModeWalk {
 		t.Errorf("mode = %d, want walk", got)
 	}
 }
@@ -104,7 +87,52 @@ func TestModeOfSkipsZeroDuration(t *testing.T) {
 	t0 := time.Date(2020, 5, 1, 0, 0, 0, 0, time.UTC)
 	pts := pathAt(10, 25, time.Second, t0)
 	pts[4].Time = pts[3].Time
-	if got := ModeOf(pts, uploaded); got != ModeVehicle {
+	if got := modeOf(pts); got != ModeVehicle {
 		t.Errorf("mode = %d, want vehicle", got)
+	}
+}
+
+// An edge over 1,200 km/h is a GPS jump: it is not a speed.
+func TestEdgeSpeedsLeavesOutJumps(t *testing.T) {
+	t0 := time.Date(2020, 5, 1, 0, 0, 0, 0, time.UTC)
+	pts := pathAt(10, 1.39, time.Second, t0)
+	if n := len(edgeSpeeds(pts, uploaded)); n != 9 {
+		t.Fatalf("%d speeds, want 9", n)
+	}
+	pts[5].Lon += 0.05 // 5 km in one second: 18,000 km/h, two edges
+	if n := len(edgeSpeeds(pts, uploaded)); n != 7 {
+		t.Errorf("%d speeds, want 7 (two jump edges left out)", n)
+	}
+}
+
+// Only jumps and no real edge: not enough speeds, so unknown.
+func TestModeOfSpeedsTooFew(t *testing.T) {
+	if m, ok := modeOfSpeeds([]float64{1, 2}, DefaultModeSpeeds()); ok || m != ModeUnknown {
+		t.Errorf("got %d %v, want unknown false", m, ok)
+	}
+	if m, ok := modeOfSpeeds([]float64{0.5, 1, 1.5}, DefaultModeSpeeds()); !ok || m != ModeWalk {
+		t.Errorf("got %d %v, want walk true", m, ok)
+	}
+}
+
+func TestParseModeSpeeds(t *testing.T) {
+	ms, err := ParseModeSpeeds("7,30,250")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ms != DefaultModeSpeeds() {
+		t.Errorf("got %+v, want the defaults", ms)
+	}
+	if ms.String() != "7,30,250" {
+		t.Errorf("String = %q", ms.String())
+	}
+	for _, bad := range []string{"30,7,250", "7,30", "a,b,c", "", "0,30,250", "7,30,250,300"} {
+		if _, err := ParseModeSpeeds(bad); err == nil {
+			t.Errorf("%q: want an error", bad)
+		}
+	}
+	ms, err = ParseModeSpeeds(" 5.5, 20, 300 ")
+	if err != nil || ms.String() != "5.5,20,300" {
+		t.Errorf("got %v, %v", ms, err)
 	}
 }

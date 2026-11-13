@@ -1,29 +1,68 @@
 package importer
 
 import (
+	"fmt"
+	"math"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 )
 
-// Mode is the transport of one line, from the median speed of its points.
+// Mode is the transport of a <trkseg>, from the median speed of its points.
 type Mode int16
 
 const (
-	ModeUnknown Mode = 0 // fewer than minTimedEdges edges with a valid time
-	ModeWalk    Mode = 1 // under 7 km/h
-	ModeBike    Mode = 2 // under 30 km/h
-	ModeVehicle Mode = 3 // under 250 km/h: cars, buses and trains
+	ModeUnknown Mode = 0 // fewer than minTimedEdges edges with a valid time, in the segment and in the trace
+	ModeWalk    Mode = 1 // under ModeSpeeds.Walk (default 7 km/h)
+	ModeBike    Mode = 2 // under ModeSpeeds.Bike (default 30 km/h)
+	ModeVehicle Mode = 3 // under ModeSpeeds.Vehicle (default 250 km/h): cars, buses and trains
 	ModePlane   Mode = 4
 )
 
-// Speed limits in m/s. Trains and cars overlap, so they share a mode.
-const (
-	walkMax    = 7.0 / 3.6
-	bikeMax    = 30.0 / 3.6
-	vehicleMax = 250.0 / 3.6
-	// A line needs this many edges with time to get a mode.
-	minTimedEdges = 3
-)
+// A line needs this many edges with time to get a mode.
+const minTimedEdges = 3
+
+// maxSpeed is 1,200 km/h. An edge faster than this is a GPS jump, not a
+// speed: it is left out of the median.
+const maxSpeed = 1200.0 / 3.6
+
+// ModeSpeeds are the upper speeds of walk, bike and vehicle in m/s. Above
+// Vehicle is plane.
+type ModeSpeeds struct{ Walk, Bike, Vehicle float64 }
+
+// DefaultModeSpeeds is 7, 30 and 250 km/h. Trains and cars overlap, so they
+// share a mode.
+func DefaultModeSpeeds() ModeSpeeds {
+	return ModeSpeeds{Walk: 7.0 / 3.6, Bike: 30.0 / 3.6, Vehicle: 250.0 / 3.6}
+}
+
+// ParseModeSpeeds reads "7,30,250" (km/h). The three values must be
+// positive and increasing.
+func ParseModeSpeeds(s string) (ModeSpeeds, error) {
+	fields := strings.Split(s, ",")
+	if len(fields) != 3 {
+		return ModeSpeeds{}, fmt.Errorf("mode speeds must be three km/h values like 7,30,250, got %q", s)
+	}
+	var v [3]float64
+	for i, f := range fields {
+		x, err := strconv.ParseFloat(strings.TrimSpace(f), 64)
+		if err != nil || math.IsNaN(x) || math.IsInf(x, 0) || x <= 0 {
+			return ModeSpeeds{}, fmt.Errorf("bad mode speed %q: it must be a positive number", strings.TrimSpace(f))
+		}
+		v[i] = x / 3.6
+	}
+	if !(v[0] < v[1] && v[1] < v[2]) {
+		return ModeSpeeds{}, fmt.Errorf("mode speeds must be increasing, got %q", s)
+	}
+	return ModeSpeeds{Walk: v[0], Bike: v[1], Vehicle: v[2]}, nil
+}
+
+// String gives the km/h form back, "7,30,250", for the flag help and dump_state.
+func (m ModeSpeeds) String() string {
+	f := func(v float64) string { return strconv.FormatFloat(math.Round(v*3.6*1e6)/1e6, 'f', -1, 64) }
+	return f(m.Walk) + "," + f(m.Bike) + "," + f(m.Vehicle)
+}
 
 // The first year with GPS traces worth keeping. Older times are GPS clocks
 // that were never set (1970, 1980).
@@ -51,9 +90,10 @@ func YearOf(pts []Point, uploaded time.Time) int16 {
 	return int16(uploaded.UTC().Year())
 }
 
-// ModeOf classifies a line by the median speed of its edges. The median,
-// not the mean, so one GPS jump does not turn a walk into a flight.
-func ModeOf(pts []Point, uploaded time.Time) Mode {
+// edgeSpeeds returns the speed of every edge with a valid time at both
+// ends, a positive duration and a possible speed (under maxSpeed). The
+// rest are GPS jumps or clock errors and are left out.
+func edgeSpeeds(pts []Point, uploaded time.Time) []float64 {
 	speeds := make([]float64, 0, len(pts))
 	for i := 1; i < len(pts); i++ {
 		a, b := pts[i-1], pts[i]
@@ -64,48 +104,31 @@ func ModeOf(pts []Point, uploaded time.Time) Mode {
 		if dt <= 0 {
 			continue
 		}
-		speeds = append(speeds, haversine(a, b)/dt)
+		if v := haversine(a, b) / dt; v < maxSpeed {
+			speeds = append(speeds, v)
+		}
 	}
-	if len(speeds) < minTimedEdges {
-		return ModeUnknown
-	}
-	slices.Sort(speeds)
-	v := speeds[len(speeds)/2] // upper middle for an even count: fine for classes
-	switch {
-	case v < walkMax:
-		return ModeWalk
-	case v < bikeMax:
-		return ModeBike
-	case v < vehicleMax:
-		return ModeVehicle
-	default:
-		return ModePlane
-	}
+	return speeds
 }
 
-// needsUpload tells whether YearOf would fall back to the upload time for
-// some <trkseg> of a downloaded trace: the segment has no timed point, or
-// its first timed point is not valid. now is the upper bound of a valid
-// time, since the upload time is not known yet.
-func needsUpload(segs [][]Point, now time.Time) bool {
-	for _, seg := range segs {
-		if len(seg) == 0 {
-			continue
-		}
-		timed := false
-		for _, p := range seg {
-			if p.Time.IsZero() {
-				continue
-			}
-			timed = true
-			if !validTime(p.Time, now) {
-				return true
-			}
-			break
-		}
-		if !timed {
-			return true
-		}
+// modeOfSpeeds classifies the median of speeds. The median, not the mean,
+// so one GPS jump does not turn a walk into a flight. ok is false with
+// fewer than minTimedEdges speeds.
+func modeOfSpeeds(speeds []float64, ms ModeSpeeds) (mode Mode, ok bool) {
+	if len(speeds) < minTimedEdges {
+		return ModeUnknown, false
 	}
-	return false
+	s := slices.Clone(speeds)
+	slices.Sort(s)
+	v := s[len(s)/2] // upper middle for an even count: fine for classes
+	switch {
+	case v < ms.Walk:
+		return ModeWalk, true
+	case v < ms.Bike:
+		return ModeBike, true
+	case v < ms.Vehicle:
+		return ModeVehicle, true
+	default:
+		return ModePlane, true
+	}
 }

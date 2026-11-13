@@ -128,8 +128,15 @@ func buildRows(t *Trace, cfg SplitConfig) *parsed {
 	p := &parsed{t: t}
 	var seg bytes.Buffer
 	low := map[int]*bytes.Buffer{}
+	// Trace mode: the median over every segment, for the segments that are
+	// too short to have their own.
+	var all []float64
+	for _, pts := range t.Segments {
+		all = append(all, edgeSpeeds(validPoints(pts), t.Uploaded)...)
+	}
+	traceMode, _ := modeOfSpeeds(all, cfg.Speeds) // ModeUnknown when the trace has fewer than 3
 	for trackid, pts := range t.Segments {
-		lines, lowGroups := BuildTrack(pts, t.Uploaded, cfg)
+		lines, lowGroups := BuildTrack(pts, t.Uploaded, traceMode, cfg)
 		for i, l := range lines {
 			fmt.Fprintf(&seg, "%d\t%d\t%d\t%d\t%d\t%s\t%s\t%s\n", t.ID, trackid, i, l.Year, l.Mode,
 				hex.EncodeToString(EWKBLineString(l.Points)), copyTime(l.Start), copyTime(l.End))

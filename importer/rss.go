@@ -116,6 +116,9 @@ func RunRSS(ctx context.Context, conn *pgx.Conn, f *Fetcher, cfg Config, rc RSSC
 	if cfg.LowZooms, err = LowZooms(ctx, conn); err != nil {
 		return st, err
 	}
+	if cfg.Speeds, err = LoadModeSpeeds(ctx, conn); err != nil {
+		return st, err
+	}
 	if err := ensureYearsToNow(ctx, conn, cfg.LowZooms); err != nil {
 		return st, err
 	}
@@ -179,16 +182,12 @@ func RunRSS(ctx context.Context, conn *pgx.Conn, f *Fetcher, cfg Config, rc RSSC
 		}
 		// The RSS mode has no name, description or tags: the website only
 		// gives them through the API, with a login. The next dump adds them.
-		uploaded, err := f.uploadTime(ctx, id, segs, fromFeed)
-		if errors.Is(err, ErrNotFound) {
-			// Deleted or hidden between the two requests.
-			st.Skipped++
-			done = id
-			continue
-		}
-		if err != nil {
-			runErr = err
-			break
+		// The original file has no upload time. The feed gives it for the
+		// last 20 traces; the others were uploaded after the dump, so now is
+		// close enough for the year.
+		uploaded, ok := fromFeed[id]
+		if !ok {
+			uploaded = time.Now()
 		}
 		st.Segments += b.addNew(&Trace{ID: id, Uploaded: uploaded, Segments: segs}, split, exp)
 		st.Inserted++

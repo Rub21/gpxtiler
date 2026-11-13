@@ -37,8 +37,11 @@ CREATE TABLE IF NOT EXISTS trace_segments (
 -- Only one row: the <time> of the last dump that was fully loaded.
 CREATE TABLE IF NOT EXISTS dump_state (
     id        boolean PRIMARY KEY DEFAULT true CHECK (id),
-    timestamp timestamptz NOT NULL
+    timestamp timestamptz NOT NULL,
+    mode_speeds text -- "7,30,250": the -mode-speeds of the import, update uses the same
 );
+-- CREATE TABLE IF NOT EXISTS does not add a column to an old table.
+ALTER TABLE dump_state ADD COLUMN IF NOT EXISTS mode_speeds text;
 
 CREATE INDEX IF NOT EXISTS trace_segments_geom_idx ON trace_segments USING gist (geom);
 

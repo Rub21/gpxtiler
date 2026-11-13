@@ -299,3 +299,43 @@ func TestEnsureYears(t *testing.T) {
 		t.Errorf("insert into a year without partition: got %v, want SQLSTATE 23514", err)
 	}
 }
+
+// The speeds of the first load are saved. Another import with other speeds
+// is refused: the modes of the loaded lines would not match.
+func TestImportSavesModeSpeeds(t *testing.T) {
+	conn := testConn(t)
+	ctx := context.Background()
+	cfg := testConfig(t.TempDir())
+	if _, err := Run(ctx, conn, dump("2026-10-31T00:00:00Z", trk(100, "")), cfg); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := conn.QueryRow(ctx, "SELECT mode_speeds FROM dump_state").Scan(&got); err != nil || got != "7,30,250" {
+		t.Fatalf("mode_speeds = %q, %v", got, err)
+	}
+	ms, err := LoadModeSpeeds(ctx, conn)
+	if err != nil || ms != DefaultModeSpeeds() {
+		t.Errorf("LoadModeSpeeds = %v, %v", ms, err)
+	}
+
+	cfg.Speeds = ModeSpeeds{Walk: 5 / 3.6, Bike: 25 / 3.6, Vehicle: 200 / 3.6}
+	_, err = Run(ctx, conn, dump("2026-11-01T00:00:00Z", trk(100, "")), cfg)
+	if err == nil || !strings.Contains(err.Error(), "drop the tables and import again") {
+		t.Errorf("second run with other speeds: err = %v", err)
+	}
+}
+
+// No row or NULL: the default speeds.
+func TestLoadModeSpeedsDefault(t *testing.T) {
+	conn := testConn(t)
+	ctx := context.Background()
+	if ms, err := LoadModeSpeeds(ctx, conn); err != nil || ms != DefaultModeSpeeds() {
+		t.Errorf("no row: %v, %v", ms, err)
+	}
+	if _, err := conn.Exec(ctx, "INSERT INTO dump_state (id, timestamp) VALUES (true, now())"); err != nil {
+		t.Fatal(err)
+	}
+	if ms, err := LoadModeSpeeds(ctx, conn); err != nil || ms != DefaultModeSpeeds() {
+		t.Errorf("NULL: %v, %v", ms, err)
+	}
+}
