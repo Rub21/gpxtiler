@@ -26,6 +26,15 @@ func ToMercator(lon, lat float64) XY {
 type Line struct {
 	Points     []XY
 	Start, End time.Time // zero when no point has a time
+	Year       int16     // partition key: YearOf
+	Mode       Mode      // ModeOf
+}
+
+// LowKey groups the parts of a simplified copy: one row of
+// trace_segments_z<N> per trace, trackid, year and mode.
+type LowKey struct {
+	Year int16
+	Mode Mode
 }
 
 // SplitConfig says how to cut a <trkseg> into lines.
@@ -44,8 +53,12 @@ func LowTolerance(z int) float64 {
 
 // BuildTrack turns the points of one <trkseg> into:
 //   - lines: the rows for trace_segments
-//   - low: per low zoom, the parts of the simplified MultiLineString for
-//     trace_segments_z<zoom>
+//   - low: per low zoom, the parts of the simplified MultiLineStrings for
+//     trace_segments_z<zoom>, grouped by year and mode
+//
+// uploaded is when the trace was uploaded: the year of a line is the GPS
+// time of its first point when that time is possible, else the upload
+// year (see YearOf). The mode comes from the median speed (see ModeOf).
 //
 // The track is cut at ±180°. Each piece is then cut every MaxPoints points
 // or MaxLength meters, and the border point is repeated in the next line.
@@ -54,8 +67,8 @@ func LowTolerance(z int) float64 {
 // For low, the piece is also cut at GPS jumps (edges longer than
 // LowMaxJump), so a jump never shows at low zooms. The lines keep the jumps:
 // serve draws them dimmer, like the current tiles.
-func BuildTrack(pts []Point, cfg SplitConfig) (lines []Line, low map[int][][]XY) {
-	low = map[int][][]XY{}
+func BuildTrack(pts []Point, uploaded time.Time, cfg SplitConfig) (lines []Line, low map[int]map[LowKey][][]XY) {
+	low = map[int]map[LowKey][][]XY{}
 	valid := make([]Point, 0, len(pts))
 	for _, p := range pts {
 		if validPoint(p) {
@@ -66,12 +79,16 @@ func BuildTrack(pts []Point, cfg SplitConfig) (lines []Line, low map[int][][]XY)
 		if len(piece) < 2 {
 			continue
 		}
-		lines = append(lines, chunk(piece, cfg.MaxPoints, cfg.MaxLength)...)
+		lines = append(lines, chunk(piece, uploaded, cfg.MaxPoints, cfg.MaxLength)...)
 		for _, part := range splitJumps(piece, cfg.LowMaxJump) {
+			key := LowKey{Year: YearOf(part, uploaded), Mode: ModeOf(part, uploaded)}
 			xy := project(part)
 			for _, z := range cfg.LowZooms {
 				if s := Simplify(xy, LowTolerance(z)); len(s) >= 2 {
-					low[z] = append(low[z], s)
+					if low[z] == nil {
+						low[z] = map[LowKey][][]XY{}
+					}
+					low[z][key] = append(low[z][key], s)
 				}
 			}
 		}
@@ -134,7 +151,7 @@ func splitJumps(pts []Point, maxJump float64) [][]Point {
 	return out
 }
 
-func chunk(pts []Point, maxPoints int, maxLength float64) []Line {
+func chunk(pts []Point, uploaded time.Time, maxPoints int, maxLength float64) []Line {
 	if maxPoints < 2 {
 		maxPoints = 2
 	}
@@ -144,18 +161,18 @@ func chunk(pts []Point, maxPoints int, maxLength float64) []Line {
 	for i := 1; i < len(pts); i++ {
 		length += haversine(pts[i-1], pts[i])
 		if i-start+1 >= maxPoints || (maxLength > 0 && length >= maxLength) {
-			lines = append(lines, makeLine(pts[start:i+1]))
+			lines = append(lines, makeLine(pts[start:i+1], uploaded))
 			start, length = i, 0
 		}
 	}
 	if len(pts)-start >= 2 {
-		lines = append(lines, makeLine(pts[start:]))
+		lines = append(lines, makeLine(pts[start:], uploaded))
 	}
 	return lines
 }
 
-func makeLine(pts []Point) Line {
-	l := Line{Points: project(pts)}
+func makeLine(pts []Point, uploaded time.Time) Line {
+	l := Line{Points: project(pts), Year: YearOf(pts, uploaded), Mode: ModeOf(pts, uploaded)}
 	for _, p := range pts {
 		if p.Time.IsZero() {
 			continue

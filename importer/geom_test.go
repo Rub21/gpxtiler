@@ -3,7 +3,19 @@ package importer
 import (
 	"math"
 	"testing"
+	"time"
 )
+
+var testUploaded = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// lowParts flattens the groups of one zoom, for tests that only count parts.
+func lowParts(groups map[LowKey][][]XY) [][]XY {
+	var out [][]XY
+	for _, parts := range groups {
+		out = append(out, parts...)
+	}
+	return out
+}
 
 func near(a, b, tol float64) bool { return math.Abs(a-b) <= tol }
 
@@ -28,8 +40,8 @@ func TestBuildTrackCutsByPoints(t *testing.T) {
 	for i := 0; i < 25; i++ {
 		pts = append(pts, Point{Lon: 9 + float64(i)*0.0001, Lat: 47})
 	}
-	lines, lows := BuildTrack(pts, SplitConfig{MaxPoints: 10, MaxLength: 1e9, LowZooms: []int{8}})
-	low := lows[8]
+	lines, lows := BuildTrack(pts, testUploaded, SplitConfig{MaxPoints: 10, MaxLength: 1e9, LowZooms: []int{8}})
+	low := lowParts(lows[8])
 	// 25 points, 10 per line, border point repeated: 10 + 10 + 7.
 	if len(lines) != 3 {
 		t.Fatalf("got %d lines", len(lines))
@@ -48,7 +60,7 @@ func TestBuildTrackCutsByPoints(t *testing.T) {
 func TestBuildTrackCutsByLength(t *testing.T) {
 	// About 11 km between points on the equator.
 	pts := []Point{{Lon: 0}, {Lon: 0.1}, {Lon: 0.2}, {Lon: 0.3}}
-	lines, _ := BuildTrack(pts, SplitConfig{MaxPoints: 1000, MaxLength: 20000})
+	lines, _ := BuildTrack(pts, testUploaded, SplitConfig{MaxPoints: 1000, MaxLength: 20000})
 	if len(lines) != 2 || len(lines[0].Points) != 3 || len(lines[1].Points) != 2 {
 		t.Fatalf("lines = %+v", lines)
 	}
@@ -56,8 +68,8 @@ func TestBuildTrackCutsByLength(t *testing.T) {
 
 func TestBuildTrackDateline(t *testing.T) {
 	pts := []Point{{Lon: 179, Lat: 10}, {Lon: 179.9, Lat: 10}, {Lon: -179.9, Lat: 12}, {Lon: -179, Lat: 12}}
-	lines, lows := BuildTrack(pts, SplitConfig{MaxPoints: 1000, MaxLength: 1e9, LowZooms: []int{8}})
-	low := lows[8]
+	lines, lows := BuildTrack(pts, testUploaded, SplitConfig{MaxPoints: 1000, MaxLength: 1e9, LowZooms: []int{8}})
+	low := lowParts(lows[8])
 	if len(lines) != 2 || len(low) != 2 {
 		t.Fatalf("lines=%d low=%d", len(lines), len(low))
 	}
@@ -82,10 +94,10 @@ func TestBuildTrackCutsLowAtJumps(t *testing.T) {
 		{Lon: 9.50, Lat: 47}, // about 36 km away
 		{Lon: 9.51, Lat: 47}, {Lon: 9.52, Lat: 47},
 	}
-	lines, lows := BuildTrack(pts, SplitConfig{MaxPoints: 1000, MaxLength: 1e9, LowZooms: []int{5, 8}, LowMaxJump: 2000})
-	low := lows[8]
-	if len(lows[5]) != 2 {
-		t.Errorf("low z5 = %d parts, want 2", len(lows[5]))
+	lines, lows := BuildTrack(pts, testUploaded, SplitConfig{MaxPoints: 1000, MaxLength: 1e9, LowZooms: []int{5, 8}, LowMaxJump: 2000})
+	low := lowParts(lows[8])
+	if len(lowParts(lows[5])) != 2 {
+		t.Errorf("low z5 = %d parts, want 2", len(lowParts(lows[5])))
 	}
 	if len(lines) != 1 || len(lines[0].Points) != 6 {
 		t.Errorf("lines = %d, points = %d, want 1 line with 6 points", len(lines), len(lines[0].Points))
@@ -94,17 +106,17 @@ func TestBuildTrackCutsLowAtJumps(t *testing.T) {
 		t.Errorf("low = %d parts, want 2 cut at the jump", len(low))
 	}
 	// With 0 the jump is kept.
-	if _, lows := BuildTrack(pts, SplitConfig{MaxPoints: 1000, MaxLength: 1e9, LowZooms: []int{8}}); len(lows[8]) != 1 {
-		t.Errorf("low = %d parts, want 1 with LowMaxJump 0", len(lows[8]))
+	if _, lows := BuildTrack(pts, testUploaded, SplitConfig{MaxPoints: 1000, MaxLength: 1e9, LowZooms: []int{8}}); len(lowParts(lows[8])) != 1 {
+		t.Errorf("low = %d parts, want 1 with LowMaxJump 0", len(lowParts(lows[8])))
 	}
 }
 
 func TestBuildTrackDropsShortPieces(t *testing.T) {
-	lines, low := BuildTrack([]Point{{Lon: 1, Lat: 1}}, SplitConfig{MaxPoints: 1000, LowZooms: []int{8}})
+	lines, low := BuildTrack([]Point{{Lon: 1, Lat: 1}}, testUploaded, SplitConfig{MaxPoints: 1000, LowZooms: []int{8}})
 	if len(lines) != 0 || len(low[8]) != 0 {
 		t.Errorf("single point should give nothing")
 	}
-	lines, _ = BuildTrack([]Point{{Lon: 1, Lat: 1}, {Lon: 200, Lat: 1}}, SplitConfig{MaxPoints: 1000})
+	lines, _ = BuildTrack([]Point{{Lon: 1, Lat: 1}, {Lon: 200, Lat: 1}}, testUploaded, SplitConfig{MaxPoints: 1000})
 	if len(lines) != 0 {
 		t.Errorf("invalid point should be dropped")
 	}
@@ -123,5 +135,49 @@ func TestWKBRoundTrip(t *testing.T) {
 	got, err := ParseWKBLineString(EWKBLineString(pts))
 	if err != nil || len(got) != 2 || got[1] != pts[1] {
 		t.Errorf("got %v %v", got, err)
+	}
+}
+
+// The simplified parts are grouped by year and mode: a walk in 2019 and a
+// drive in 2020 give two rows for zoom 8.
+func TestBuildTrackGroupsLowByYearAndMode(t *testing.T) {
+	up := time.Date(2020, 6, 1, 0, 0, 0, 0, time.UTC)
+	walk := pathAt(10, 1.39, time.Second, time.Date(2019, 12, 31, 23, 0, 0, 0, time.UTC))
+	drive := pathAt(10, 25, time.Second, time.Date(2020, 1, 1, 1, 0, 0, 0, time.UTC))
+	for i := range drive {
+		drive[i].Lon += 1 // 111 km east: a GPS jump, so the low copy is cut here
+	}
+	pts := append(walk, drive...)
+	lines, lows := BuildTrack(pts, up, SplitConfig{MaxPoints: 11, MaxLength: 1e9, LowZooms: []int{8}, LowMaxJump: 2000})
+	// 20 points, 11 per line, border point repeated: 11 + 10.
+	// Line 0 is the walk plus the first drive point; line 1 is the drive.
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines", len(lines))
+	}
+	if lines[0].Year != 2019 || lines[0].Mode != ModeWalk {
+		t.Errorf("line 0 = %d %d, want 2019 walk", lines[0].Year, lines[0].Mode)
+	}
+	if lines[1].Year != 2020 || lines[1].Mode != ModeVehicle {
+		t.Errorf("line 1 = %d %d, want 2020 vehicle", lines[1].Year, lines[1].Mode)
+	}
+	low := lows[8]
+	if len(low) != 2 {
+		t.Fatalf("low groups = %v", low)
+	}
+	if len(low[LowKey{2019, ModeWalk}]) != 1 || len(low[LowKey{2020, ModeVehicle}]) != 1 {
+		t.Errorf("low groups = %v", low)
+	}
+}
+
+// Without times, the year is the upload year and the mode is unknown.
+func TestBuildTrackNoTimes(t *testing.T) {
+	up := time.Date(2020, 6, 1, 0, 0, 0, 0, time.UTC)
+	pts := []Point{{Lon: 0}, {Lon: 0.001}, {Lon: 0.002}}
+	lines, lows := BuildTrack(pts, up, SplitConfig{MaxPoints: 1000, MaxLength: 1e9, LowZooms: []int{8}})
+	if len(lines) != 1 || lines[0].Year != 2020 || lines[0].Mode != ModeUnknown {
+		t.Fatalf("lines = %+v", lines)
+	}
+	if len(lows[8][LowKey{2020, ModeUnknown}]) != 1 {
+		t.Errorf("low = %v", lows[8])
 	}
 }

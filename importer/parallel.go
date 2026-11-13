@@ -128,18 +128,20 @@ func buildRows(t *Trace, cfg SplitConfig) *parsed {
 	var seg bytes.Buffer
 	low := map[int]*bytes.Buffer{}
 	for trackid, pts := range t.Segments {
-		lines, lowParts := BuildTrack(pts, cfg)
+		lines, lowGroups := BuildTrack(pts, t.Uploaded, cfg)
 		for i, l := range lines {
 			fmt.Fprintf(&seg, "%d\t%d\t%d\t%s\t%s\t%s\n", t.ID, trackid, i,
 				hex.EncodeToString(EWKBLineString(l.Points)), copyTime(l.Start), copyTime(l.End))
 			p.n++
 		}
 		p.lines = append(p.lines, lines...)
-		for z, parts := range lowParts {
+		for z, groups := range lowGroups {
 			if low[z] == nil {
 				low[z] = &bytes.Buffer{}
 			}
-			fmt.Fprintf(low[z], "%d\t%d\t%s\n", t.ID, trackid, hex.EncodeToString(EWKBMultiLineString(parts)))
+			for _, parts := range groups {
+				fmt.Fprintf(low[z], "%d\t%d\t%s\n", t.ID, trackid, hex.EncodeToString(EWKBMultiLineString(parts)))
+			}
 		}
 	}
 	p.segRows = seg.Bytes()
