@@ -25,6 +25,9 @@ type Trace struct {
 	Name        *string // nil when there is no <name> (trackable traces)
 	Description *string
 	Tags        []string
+	// Uploaded is the <osm:timestamp> of the trace: when it was uploaded to
+	// the website. Zero when the dump has none (dumps before 2026-11).
+	Uploaded time.Time
 	// One entry per <trkseg>, in dump order. The index is the trackid.
 	// Empty when the geometry was skipped.
 	Segments [][]Point
@@ -161,6 +164,15 @@ func (r *Reader) readTrk(skipGeom func(id int64) bool) (*Trace, error) {
 					return nil, err
 				}
 				t.Tags = append(t.Tags, s)
+			case osm && e.Name.Local == "timestamp":
+				s, err := readText(r.dec)
+				if err != nil {
+					return nil, err
+				}
+				t.Uploaded, err = time.Parse(time.RFC3339, strings.TrimSpace(s))
+				if err != nil {
+					return nil, fmt.Errorf("bad <osm:timestamp> %q: %w", s, err)
+				}
 			case !osm && e.Name.Local == "name":
 				s, err := readText(r.dec)
 				if err != nil {
