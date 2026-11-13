@@ -234,6 +234,39 @@ func LowZooms(ctx context.Context, conn *pgx.Conn) ([]int, error) {
 	return pgx.CollectRows(rows, pgx.RowTo[int])
 }
 
+// MinYear is the first partition. GPS times before it are not trusted
+// (see validTime), so no row gets an older year.
+const MinYear = 2000
+
+// YearPartition is the name of the partition of table for one year.
+func YearPartition(table string, year int) string {
+	return fmt.Sprintf("%s_y%d", table, year)
+}
+
+// EnsureYears creates the partitions of trace_segments and of the
+// simplified copies for zooms, from year from to year to. A row with a
+// year without partition fails to insert, so import and update call this
+// up to the next year before writing.
+func EnsureYears(ctx context.Context, conn *pgx.Conn, zooms []int, from, to int) error {
+	tables := []string{"trace_segments"}
+	for _, z := range zooms {
+		tables = append(tables, LowTable(z))
+	}
+	var sql strings.Builder
+	for y := from; y <= to; y++ {
+		for _, t := range tables {
+			fmt.Fprintf(&sql, "CREATE TABLE IF NOT EXISTS %s PARTITION OF %s FOR VALUES FROM (%d) TO (%d);\n",
+				YearPartition(t, y), t, y, y+1)
+		}
+	}
+	return execMulti(ctx, conn.PgConn(), sql.String())
+}
+
+// ensureYearsToNow creates the partitions from MinYear to next year.
+func ensureYearsToNow(ctx context.Context, conn *pgx.Conn, zooms []int) error {
+	return EnsureYears(ctx, conn, zooms, MinYear, time.Now().UTC().Year()+1)
+}
+
 // EnsureLowTables creates the simplified copies for zooms. When the
 // database already has traces with other copies, it is an error: the
 // copies are only filled when a trace is loaded, so a new import is needed.
@@ -261,9 +294,11 @@ func EnsureLowTables(ctx context.Context, conn *pgx.Conn, zooms []int) error {
 			CREATE TABLE IF NOT EXISTS %[1]s (
 				gpx_id  bigint,
 				trackid int,
+				year    smallint NOT NULL,
+				mode    smallint NOT NULL,
 				geom    geometry(MultiLineString, 3857),
-				PRIMARY KEY (gpx_id, trackid)
-			);
+				PRIMARY KEY (gpx_id, trackid, year, mode)
+			) PARTITION BY RANGE (year);
 			CREATE INDEX IF NOT EXISTS %[1]s_geom_idx ON %[1]s USING gist (geom)`, LowTable(z)))
 		if err != nil {
 			return err

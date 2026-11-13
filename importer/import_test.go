@@ -2,6 +2,7 @@ package importer
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Rub21/gpxtiler/schema"
 )
@@ -235,5 +237,46 @@ func TestImportKeepsNewerTraces(t *testing.T) {
 	}
 	if n := count(t, conn, "SELECT count(*) FROM traces WHERE gpx_id IN (1, 3, 10, 50)"); n != 4 {
 		t.Errorf("%d of 1, 3, 10, 50 left, want 4", n)
+	}
+}
+
+func TestEnsureYears(t *testing.T) {
+	conn := testConn(t)
+	ctx := context.Background()
+	if err := EnsureLowTables(ctx, conn, []int{8}); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureYears(ctx, conn, []int{8}, 2019, 2020); err != nil {
+		t.Fatal(err)
+	}
+	// Twice is fine.
+	if err := EnsureYears(ctx, conn, []int{8}, 2019, 2020); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"trace_segments_y2019", "trace_segments_y2020", "trace_segments_z8_y2019", "trace_segments_z8_y2020"} {
+		if n := count(t, conn, "SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = $1", name); n != 1 {
+			t.Errorf("table %s missing", name)
+		}
+	}
+	// The partitions are not simplified copies.
+	zooms, err := LowZooms(ctx, conn)
+	if err != nil || len(zooms) != 1 || zooms[0] != 8 {
+		t.Errorf("LowZooms = %v, %v", zooms, err)
+	}
+	// A row of 2019 goes to the 2019 partition.
+	_, err = conn.Exec(ctx, `INSERT INTO trace_segments (gpx_id, trackid, segment, year, mode, geom)
+		VALUES (1, 0, 0, 2019, 1, ST_SetSRID(ST_MakeLine(ST_MakePoint(0, 0), ST_MakePoint(1, 1)), 3857))`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments_y2019"); n != 1 {
+		t.Errorf("rows in 2019 partition = %d", n)
+	}
+	// A year without a partition fails: import must create them first.
+	_, err = conn.Exec(ctx, `INSERT INTO trace_segments (gpx_id, trackid, segment, year, mode, geom)
+		VALUES (1, 0, 1, 2021, 1, ST_SetSRID(ST_MakeLine(ST_MakePoint(0, 0), ST_MakePoint(1, 1)), 3857))`)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+		t.Errorf("insert into a year without partition: got %v, want SQLSTATE 23514", err)
 	}
 }
