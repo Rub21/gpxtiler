@@ -2,6 +2,7 @@ package importer
 
 import (
 	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -53,7 +54,7 @@ func (f *Fetcher) get(ctx context.Context, path string) (io.ReadCloser, error) {
 	switch {
 	case resp.StatusCode == http.StatusOK:
 		return resp.Body, nil
-	case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone:
+	case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone || resp.StatusCode == http.StatusForbidden:
 		resp.Body.Close()
 		return nil, ErrNotFound
 	default:
@@ -76,4 +77,43 @@ func (f *Fetcher) Trace(ctx context.Context, id int64) ([][]Point, error) {
 		return nil, fmt.Errorf("trace %d: %w", id, err)
 	}
 	return segs, nil
+}
+
+// Details reads the upload time of a trace from the API. The website
+// answers 403 for traces that are not public: that is ErrNotFound too.
+func (f *Fetcher) Details(ctx context.Context, id int64) (time.Time, error) {
+	body, err := f.get(ctx, fmt.Sprintf("/api/0.6/gpx/%d/details", id))
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer body.Close()
+	// <osm><gpx_file timestamp="..."/></osm>
+	var doc struct {
+		File struct {
+			Timestamp string `xml:"timestamp,attr"`
+		} `xml:"gpx_file"`
+	}
+	if err := xml.NewDecoder(body).Decode(&doc); err != nil {
+		return time.Time{}, fmt.Errorf("trace %d details: %w", id, err)
+	}
+	t, err := time.Parse(time.RFC3339, doc.File.Timestamp)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("trace %d details: bad timestamp %q: %w", id, doc.File.Timestamp, err)
+	}
+	return t, nil
+}
+
+// uploadTime returns the upload time to store with a downloaded trace:
+// the feed date when the id is in fromFeed; now when every segment has a
+// valid GPS time (the year comes from the GPS, now is only the upper
+// bound); else one more request to Details.
+func (f *Fetcher) uploadTime(ctx context.Context, id int64, segs [][]Point, fromFeed map[int64]time.Time) (time.Time, error) {
+	if t, ok := fromFeed[id]; ok {
+		return t, nil
+	}
+	now := time.Now()
+	if !needsUpload(segs, now) {
+		return now, nil
+	}
+	return f.Details(ctx, id)
 }

@@ -135,6 +135,15 @@ func TestImportSync(t *testing.T) {
 	if n := count(t, conn, "SELECT count(*) FROM trace_segments WHERE gpx_id = 1 AND ST_NPoints(geom) = 4 AND ST_SRID(geom) = 3857 AND started_at IS NOT NULL"); n != 1 {
 		t.Errorf("trace 1 segment is wrong")
 	}
+	// Trace 1: GPS time 2013-08-01, uploaded 2013-08-01 11:00. Three timed
+	// points 10 s apart, about 134 m each: 48 km/h, but only 2 timed edges,
+	// so unknown.
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments_y2013 WHERE gpx_id = 1 AND year = 2013 AND mode = 0"); n != 1 {
+		t.Errorf("trace 1 should be in the 2013 partition with mode unknown")
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments_z8_y2013 WHERE gpx_id = 1 AND mode = 0"); n != 1 {
+		t.Errorf("trace 1 low copy should be in the 2013 partition")
+	}
 
 	// Same dump again: nothing new, nothing deleted.
 	f.Seek(0, io.SeekStart)
@@ -153,6 +162,16 @@ func TestImportSync(t *testing.T) {
 	}
 	if st.Inserted != 2 || st.Updated != 3 || st.Deleted != 1 {
 		t.Errorf("sync stats = %+v", st)
+	}
+	// Trace 9 has no <osm:timestamp>: the dump time (2013-08-08) is the
+	// upload time. Its GPS time 2020 is after the upload, so it is not
+	// trusted: the upload year 2013.
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments_y2013 WHERE gpx_id = 9"); n != 1 {
+		t.Errorf("trace 9 should be in the 2013 partition")
+	}
+	// Trace 10 has no times: the dump year.
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments_y2013 WHERE gpx_id = 10"); n != 2 {
+		t.Errorf("trace 10 should have 2 lines in the 2013 partition")
 	}
 	conn.QueryRow(ctx, "SELECT name FROM traces WHERE gpx_id = 1").Scan(&name)
 	if name != "Evening ride" {

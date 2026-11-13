@@ -5,6 +5,29 @@ import (
 	"time"
 )
 
+func TestNeedsUpload(t *testing.T) {
+	now := time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC)
+	ok := pathAt(3, 10, time.Second, time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC))
+	noTime := pathAt(3, 10, time.Second, time.Time{})
+	bad := pathAt(3, 10, time.Second, time.Unix(0, 0).UTC())
+	cases := []struct {
+		name string
+		segs [][]Point
+		want bool
+	}{
+		{"all valid", [][]Point{ok, ok}, false},
+		{"one segment without time", [][]Point{ok, noTime}, true},
+		{"one segment with 1970", [][]Point{bad}, true},
+		{"empty segment is skipped", [][]Point{ok, {}}, false},
+		{"no segments", nil, false},
+	}
+	for _, c := range cases {
+		if got := needsUpload(c.segs, now); got != c.want {
+			t.Errorf("%s: needsUpload = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 var uploaded = time.Date(2020, 6, 1, 12, 0, 0, 0, time.UTC)
 
 // pathAt makes n points along the equator, step meters apart, with one

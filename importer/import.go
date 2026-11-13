@@ -94,6 +94,9 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 	if err := EnsureLowTables(ctx, conn, cfg.LowZooms); err != nil {
 		return st, err
 	}
+	if err := ensureYearsToNow(ctx, conn, cfg.LowZooms); err != nil {
+		return st, err
+	}
 	// id -> seen in this dump
 	ids, err := loadIDs(ctx, conn)
 	if err != nil {
@@ -123,7 +126,7 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 	var parseErr error
 	parseDone := make(chan struct{})
 	go func() {
-		parseErr = parseAll(pctx, ds, cfg.Workers, skipGeom, cfg.split(), parsedCh)
+		parseErr = parseAll(pctx, ds, cfg.Workers, skipGeom, cfg.split(), rd.DumpTime, parsedCh)
 		close(parseDone)
 	}()
 	fail := func(err error) (Stats, error) {
@@ -459,11 +462,11 @@ func (b *batch) flush(ctx context.Context, conn *pgx.Conn, exp *Expire) error {
 	if err := copyIn("trace_tags (gpx_id, tag)", &b.tags); err != nil {
 		return err
 	}
-	if err := copyIn("trace_segments (gpx_id, trackid, segment, geom, started_at, ended_at)", &b.segments); err != nil {
+	if err := copyIn("trace_segments (gpx_id, trackid, segment, year, mode, geom, started_at, ended_at)", &b.segments); err != nil {
 		return err
 	}
 	for z, buf := range b.low {
-		if err := copyIn(LowTable(z)+" (gpx_id, trackid, geom)", buf); err != nil {
+		if err := copyIn(LowTable(z)+" (gpx_id, trackid, year, mode, geom)", buf); err != nil {
 			return err
 		}
 	}

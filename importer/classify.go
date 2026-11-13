@@ -82,3 +82,30 @@ func ModeOf(pts []Point, uploaded time.Time) Mode {
 		return ModePlane
 	}
 }
+
+// needsUpload tells whether YearOf would fall back to the upload time for
+// some <trkseg> of a downloaded trace: the segment has no timed point, or
+// its first timed point is not valid. now is the upper bound of a valid
+// time, since the upload time is not known yet.
+func needsUpload(segs [][]Point, now time.Time) bool {
+	for _, seg := range segs {
+		if len(seg) == 0 {
+			continue
+		}
+		timed := false
+		for _, p := range seg {
+			if p.Time.IsZero() {
+				continue
+			}
+			timed = true
+			if !validTime(p.Time, now) {
+				return true
+			}
+			break
+		}
+		if !timed {
+			return true
+		}
+	}
+	return false
+}

@@ -11,6 +11,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -130,7 +131,7 @@ func buildRows(t *Trace, cfg SplitConfig) *parsed {
 	for trackid, pts := range t.Segments {
 		lines, lowGroups := BuildTrack(pts, t.Uploaded, cfg)
 		for i, l := range lines {
-			fmt.Fprintf(&seg, "%d\t%d\t%d\t%s\t%s\t%s\n", t.ID, trackid, i,
+			fmt.Fprintf(&seg, "%d\t%d\t%d\t%d\t%d\t%s\t%s\t%s\n", t.ID, trackid, i, l.Year, l.Mode,
 				hex.EncodeToString(EWKBLineString(l.Points)), copyTime(l.Start), copyTime(l.End))
 			p.n++
 		}
@@ -139,8 +140,9 @@ func buildRows(t *Trace, cfg SplitConfig) *parsed {
 			if low[z] == nil {
 				low[z] = &bytes.Buffer{}
 			}
-			for _, parts := range groups {
-				fmt.Fprintf(low[z], "%d\t%d\t%s\n", t.ID, trackid, hex.EncodeToString(EWKBMultiLineString(parts)))
+			for key, parts := range groups {
+				fmt.Fprintf(low[z], "%d\t%d\t%d\t%d\t%s\n", t.ID, trackid, key.Year, key.Mode,
+					hex.EncodeToString(EWKBMultiLineString(parts)))
 			}
 		}
 	}
@@ -155,8 +157,9 @@ func buildRows(t *Trace, cfg SplitConfig) *parsed {
 }
 
 // parseAll reads the traces of ds with workers goroutines and sends them
-// to out, in any order. It closes out when the dump is done.
-func parseAll(ctx context.Context, ds *dumpStream, workers int, skipGeom func(int64) bool, cfg SplitConfig, out chan<- *parsed) error {
+// to out, in any order. It closes out when the dump is done. uploaded is
+// the upload time for traces without <osm:timestamp>: the dump time.
+func parseAll(ctx context.Context, ds *dumpStream, workers int, skipGeom func(int64) bool, cfg SplitConfig, uploaded time.Time, out chan<- *parsed) error {
 	g, ctx := errgroup.WithContext(ctx)
 	chunks := make(chan []byte, workers)
 	g.Go(func() error {
@@ -182,6 +185,9 @@ func parseAll(ctx context.Context, ds *dumpStream, workers int, skipGeom func(in
 				t, err := parseChunk(ds.gpxStart, chunk, skipGeom)
 				if err != nil {
 					return fmt.Errorf("reading dump: %w", err)
+				}
+				if t.Uploaded.IsZero() {
+					t.Uploaded = uploaded
 				}
 				select {
 				case out <- buildRows(t, cfg):

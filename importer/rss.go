@@ -42,32 +42,41 @@ type RSSStats struct {
 
 var traceLink = regexp.MustCompile(`/traces/([0-9]+)\b`)
 
-// MaxRSSID returns the highest trace id in the website RSS feed.
-// The feed only lists the last 20 public traces, so it is used only to
-// know how far to go. The ids in between are checked one by one.
-func MaxRSSID(in io.Reader) (int64, error) {
+// ReadRSS reads the website RSS feed: the highest trace id, and the upload
+// time (pubDate) of every trace in it. The feed only lists the last 20
+// public traces, so the ids in between are checked one by one and most
+// of them are not in uploaded.
+func ReadRSS(in io.Reader) (max int64, uploaded map[int64]time.Time, err error) {
 	var feed struct {
 		Items []struct {
-			Link string `xml:"link"`
+			Link    string `xml:"link"`
+			PubDate string `xml:"pubDate"`
 		} `xml:"channel>item"`
 	}
 	if err := xml.NewDecoder(in).Decode(&feed); err != nil {
-		return 0, fmt.Errorf("reading RSS: %w", err)
+		return 0, nil, fmt.Errorf("reading RSS: %w", err)
 	}
-	var max int64
+	uploaded = map[int64]time.Time{}
 	for _, it := range feed.Items {
 		m := traceLink.FindStringSubmatch(it.Link)
 		if m == nil {
 			continue
 		}
-		if id, err := strconv.ParseInt(m[1], 10, 64); err == nil && id > max {
+		id, err := strconv.ParseInt(m[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		if id > max {
 			max = id
+		}
+		if t, err := time.Parse(time.RFC1123Z, it.PubDate); err == nil {
+			uploaded[id] = t.UTC()
 		}
 	}
 	if max == 0 {
-		return 0, errors.New("RSS feed has no trace links")
+		return 0, nil, errors.New("RSS feed has no trace links")
 	}
-	return max, nil
+	return max, uploaded, nil
 }
 
 // RunRSS loads the new traces, like gpx-updater does today:
@@ -86,7 +95,7 @@ func RunRSS(ctx context.Context, conn *pgx.Conn, f *Fetcher, cfg Config, rc RSSC
 	if err != nil {
 		return st, err
 	}
-	max, err := MaxRSSID(body)
+	max, fromFeed, err := ReadRSS(body)
 	body.Close()
 	if err != nil {
 		return st, err
@@ -105,6 +114,9 @@ func RunRSS(ctx context.Context, conn *pgx.Conn, f *Fetcher, cfg Config, rc RSSC
 
 	// The simplified copies are the ones import made.
 	if cfg.LowZooms, err = LowZooms(ctx, conn); err != nil {
+		return st, err
+	}
+	if err := ensureYearsToNow(ctx, conn, cfg.LowZooms); err != nil {
 		return st, err
 	}
 	// Ids already loaded, for example by a newer dump.
@@ -167,7 +179,18 @@ func RunRSS(ctx context.Context, conn *pgx.Conn, f *Fetcher, cfg Config, rc RSSC
 		}
 		// The RSS mode has no name, description or tags: the website only
 		// gives them through the API, with a login. The next dump adds them.
-		st.Segments += b.addNew(&Trace{ID: id, Segments: segs}, split, exp)
+		uploaded, err := f.uploadTime(ctx, id, segs, fromFeed)
+		if errors.Is(err, ErrNotFound) {
+			// Deleted or hidden between the two requests.
+			st.Skipped++
+			done = id
+			continue
+		}
+		if err != nil {
+			runErr = err
+			break
+		}
+		st.Segments += b.addNew(&Trace{ID: id, Uploaded: uploaded, Segments: segs}, split, exp)
 		st.Inserted++
 		done = id
 		if b.count >= cfg.BatchSize {

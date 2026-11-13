@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 const gpx11 = `<?xml version="1.0" encoding="UTF-8"?>
@@ -73,24 +74,35 @@ func rssFeed(ids ...int64) string {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>t</title>`)
 	for _, id := range ids {
-		fmt.Fprintf(&b, `<item><title>x</title><link>https://www.openstreetmap.org/user/A%%20B/traces/%d</link></item>`, id)
+		fmt.Fprintf(&b, `<item><title>x</title><link>https://www.openstreetmap.org/user/A%%20B/traces/%d</link><pubDate>Thu, 12 Nov 2026 21:08:54 +0000</pubDate></item>`, id)
 	}
 	b.WriteString(`</channel></rss>`)
 	return b.String()
 }
 
-func TestMaxRSSID(t *testing.T) {
-	max, err := MaxRSSID(strings.NewReader(rssFeed(105, 110, 99)))
+func TestReadRSS(t *testing.T) {
+	max, uploaded, err := ReadRSS(strings.NewReader(rssFeed(105, 110, 99)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if max != 110 {
 		t.Errorf("max = %d, want 110", max)
 	}
-	if _, err := MaxRSSID(strings.NewReader(rssFeed())); err == nil {
+	// rssFeed gives every item the same pubDate.
+	want := time.Date(2026, 11, 12, 21, 8, 54, 0, time.UTC)
+	if len(uploaded) != 3 || !uploaded[105].Equal(want) {
+		t.Errorf("uploaded = %v", uploaded)
+	}
+	if _, _, err := ReadRSS(strings.NewReader(rssFeed())); err == nil {
 		t.Error("empty feed should fail")
 	}
 }
+
+// detailsCalls counts the details requests of fakeSite, by trace id.
+var detailsCalls = map[int64]int{}
+
+// detailsMissing makes fakeSite answer 404 to the details call of these ids.
+var detailsMissing = map[int64]bool{}
 
 // fakeSite serves the RSS feed and the data of the public traces.
 // Other ids answer 404, like trackable or deleted traces.
@@ -101,6 +113,15 @@ func fakeSite(t *testing.T, rssIDs []int64, public map[int64]string, fail map[in
 			return
 		}
 		var id int64
+		if _, err := fmt.Sscanf(r.URL.Path, "/api/0.6/gpx/%d/details", &id); err == nil {
+			if _, ok := public[id]; !ok || detailsMissing[id] {
+				http.NotFound(w, r)
+				return
+			}
+			detailsCalls[id]++
+			fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><osm version="0.6"><gpx_file id="%d" name="x.gpx" visibility="identifiable" pending="false" timestamp="2024-03-05T06:07:08Z"></gpx_file></osm>`, id)
+			return
+		}
 		if _, err := fmt.Sscanf(r.URL.Path, "/traces/%d/data.gpx", &id); err != nil {
 			http.NotFound(w, r)
 			return
@@ -131,6 +152,7 @@ func trk(id int64, name string) string {
 }
 
 func TestRunRSS(t *testing.T) {
+	detailsCalls = map[int64]int{}
 	conn := testConn(t)
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -164,6 +186,18 @@ func TestRunRSS(t *testing.T) {
 	if n := count(t, conn, "SELECT count(*) FROM trace_segments WHERE gpx_id = 102"); n != 1 {
 		t.Errorf("trace 102 has %d segments, want 1", n)
 	}
+	// 102 and 104 are in the feed: pubDate 2026-11-12, no details call.
+	// gpx11 (102) has GPS times in 2013, before the upload: year 2013.
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments WHERE gpx_id = 102 AND year = 2013"); n != 1 {
+		t.Errorf("trace 102 should have year 2013")
+	}
+	// gpx10 (104) has no times: the upload year from the feed.
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments WHERE gpx_id = 104 AND year = 2026"); n != 1 {
+		t.Errorf("trace 104 should have year 2026")
+	}
+	if len(detailsCalls) != 0 {
+		t.Errorf("details called for %v, the feed had the dates", detailsCalls)
+	}
 	if n := count(t, conn, "SELECT last_id FROM rss_state"); n != 104 {
 		t.Errorf("last_id = %d, want 104", n)
 	}
@@ -175,6 +209,73 @@ func TestRunRSS(t *testing.T) {
 	st, err = RunRSS(ctx, conn, f, cfg, rc)
 	if err != nil || st.Checked != 0 {
 		t.Fatalf("second run: %+v, %v", st, err)
+	}
+}
+
+// A trace that is not in the feed and has no GPS time gets its upload time
+// from the details call. One with GPS time does not need the call.
+func TestRunRSSDetails(t *testing.T) {
+	detailsCalls = map[int64]int{}
+	conn := testConn(t)
+	ctx := context.Background()
+	cfg := testConfig(t.TempDir())
+	if _, err := Run(ctx, conn, dump("2026-10-31T00:00:00Z", trk(100, "")), cfg); err != nil {
+		t.Fatal(err)
+	}
+	// The feed only lists 104: 101 to 103 are behind.
+	srv := fakeSite(t, []int64{104}, map[int64]string{101: gpx10, 102: gpx11, 104: gpx10}, nil)
+	f := NewFetcher(srv.URL)
+	f.Delay = 0
+	if _, err := RunRSS(ctx, conn, f, cfg, DefaultRSSConfig()); err != nil {
+		t.Fatal(err)
+	}
+	// 101: no GPS time, not in the feed: details, 2024.
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments WHERE gpx_id = 101 AND year = 2024"); n != 1 {
+		t.Errorf("trace 101 should have year 2024 from details")
+	}
+	// 102: GPS time 2013: no details needed.
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments WHERE gpx_id = 102 AND year = 2013"); n != 1 {
+		t.Errorf("trace 102 should have year 2013")
+	}
+	// 104: no GPS time, but in the feed.
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments WHERE gpx_id = 104 AND year = 2026"); n != 1 {
+		t.Errorf("trace 104 should have year 2026 from the feed")
+	}
+	if detailsCalls[101] != 1 || detailsCalls[102] != 0 || detailsCalls[104] != 0 {
+		t.Errorf("details calls = %v, want only 101", detailsCalls)
+	}
+}
+
+// A trace whose details answer 404 after the download worked was deleted or
+// hidden in between: it is skipped and the run goes on.
+func TestRunRSSDetailsMissing(t *testing.T) {
+	detailsCalls = map[int64]int{}
+	detailsMissing = map[int64]bool{101: true}
+	t.Cleanup(func() { detailsMissing = map[int64]bool{} })
+	conn := testConn(t)
+	ctx := context.Background()
+	cfg := testConfig(t.TempDir())
+	if _, err := Run(ctx, conn, dump("2026-10-31T00:00:00Z", trk(100, "")), cfg); err != nil {
+		t.Fatal(err)
+	}
+	srv := fakeSite(t, []int64{102}, map[int64]string{101: gpx10, 102: gpx10}, nil)
+	f := NewFetcher(srv.URL)
+	f.Delay = 0
+	st, err := RunRSS(ctx, conn, f, cfg, DefaultRSSConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Skipped != 1 || st.Inserted != 1 || st.ToID != 102 {
+		t.Errorf("stats %+v", st)
+	}
+	if n := count(t, conn, "SELECT count(*) FROM traces WHERE gpx_id = 101"); n != 0 {
+		t.Errorf("trace 101 should not be loaded")
+	}
+	if n := count(t, conn, "SELECT count(*) FROM traces WHERE gpx_id = 102"); n != 1 {
+		t.Errorf("trace 102 should be loaded")
+	}
+	if n := count(t, conn, "SELECT last_id FROM rss_state"); n != 102 {
+		t.Errorf("last_id = %d, want 102", n)
 	}
 }
 
