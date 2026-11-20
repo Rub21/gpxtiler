@@ -128,7 +128,8 @@ func (r *Renderer) Draw(ctx context.Context, z, x, y int) (*Canvas, error) {
 	// edges and so their brightness. Import already cuts lines every 1000
 	// points or 50 km, so the rows are small.
 	table, low := r.table(z)
-	sql := "SELECT ST_AsBinary(geom) FROM " + table + " WHERE geom && ST_TileEnvelope($1, $2, $3, margin => 1.0 / 256)"
+	// trace_segments has the altitude in Z: the tile does not use it.
+	sql := "SELECT ST_AsBinary(ST_Force2D(geom)) FROM " + table + " WHERE geom && ST_TileEnvelope($1, $2, $3, margin => 1.0 / 256)"
 	if low {
 		sql = "SELECT ST_AsBinary((ST_Dump(geom)).geom) FROM " + table + " WHERE geom && ST_TileEnvelope($1, $2, $3, margin => 1.0 / 256)"
 	}

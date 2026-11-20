@@ -29,7 +29,7 @@ const vaduz = `<?xml version="1.0" encoding="UTF-8"?>
 <gpx version="1.0" xmlns="http://www.topografix.com/GPX/1/0" xmlns:osm="https://www.openstreetmap.org/gpx/0.1">
  <time>2026-10-31T00:00:00Z</time>
  <trk><osm:id>1</osm:id><trkseg>
-  <trkpt lat="47.1400" lon="9.5200"/><trkpt lat="47.1400" lon="9.5210"/><trkpt lat="47.1400" lon="9.5220"/>
+  <trkpt lat="47.1400" lon="9.5200"><ele>455.5</ele></trkpt><trkpt lat="47.1400" lon="9.5210"/><trkpt lat="47.1400" lon="9.5220"/>
  </trkseg></trk>
 </gpx>
 `
@@ -232,6 +232,10 @@ func TestServer(t *testing.T) {
 	resp, body = get("/traces/1")
 	if resp.StatusCode != 200 || !bytes.Contains(body, []byte(`"segments":`)) || !bytes.Contains(body, []byte(`"type":"MultiLineString"`)) {
 		t.Errorf("trace 1: %d %s", resp.StatusCode, body)
+	}
+	// The altitude is the third coordinate, 0 for a point without <ele>.
+	if !bytes.Contains(body, []byte(`[9.52,47.14,455.5]`)) || !bytes.Contains(body, []byte(`[9.522,47.14,0]`)) {
+		t.Errorf("trace 1 without altitude: %s", body)
 	}
 	if resp, _ := get("/traces/999999"); resp.StatusCode != 404 {
 		t.Errorf("missing trace: %d, want 404", resp.StatusCode)

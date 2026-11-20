@@ -124,6 +124,18 @@ func TestImportSync(t *testing.T) {
 	if n := count(t, conn, "SELECT count(*) FROM trace_segments_z8"); n != 1 {
 		t.Errorf("low = %d", n)
 	}
+	// The altitude is the Z of every point, 0 for the point without <ele>.
+	// The simplified copies have no Z.
+	var ele []float64
+	if err := conn.QueryRow(ctx, "SELECT array_agg(ST_Z(p.geom) ORDER BY p.path) FROM trace_segments s, ST_DumpPoints(s.geom) p WHERE s.gpx_id = 1").Scan(&ele); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ele, []float64{450.5, 455, 0, 460}) {
+		t.Errorf("ele = %v", ele)
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments_z8 WHERE ST_NDims(geom) <> 2"); n != 0 {
+		t.Errorf("the simplified copy should have no Z")
+	}
 	var name, desc string
 	conn.QueryRow(ctx, "SELECT name, description FROM traces WHERE gpx_id = 1").Scan(&name, &desc)
 	if name != "Morning ride" || desc != "Vaduz <loop> & back" {
@@ -284,7 +296,7 @@ func TestEnsureYears(t *testing.T) {
 	}
 	// A row of 2019 goes to the 2019 partition.
 	_, err = conn.Exec(ctx, `INSERT INTO trace_segments (gpx_id, trackid, segment, year, mode, geom)
-		VALUES (1, 0, 0, 2019, 1, ST_SetSRID(ST_MakeLine(ST_MakePoint(0, 0), ST_MakePoint(1, 1)), 3857))`)
+		VALUES (1, 0, 0, 2019, 1, ST_SetSRID(ST_MakeLine(ST_MakePoint(0, 0, 0), ST_MakePoint(1, 1, 0)), 3857))`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +305,7 @@ func TestEnsureYears(t *testing.T) {
 	}
 	// A year without a partition fails: import must create them first.
 	_, err = conn.Exec(ctx, `INSERT INTO trace_segments (gpx_id, trackid, segment, year, mode, geom)
-		VALUES (1, 0, 1, 2021, 1, ST_SetSRID(ST_MakeLine(ST_MakePoint(0, 0), ST_MakePoint(1, 1)), 3857))`)
+		VALUES (1, 0, 1, 2021, 1, ST_SetSRID(ST_MakeLine(ST_MakePoint(0, 0, 0), ST_MakePoint(1, 1, 0)), 3857))`)
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
 		t.Errorf("insert into a year without partition: got %v, want SQLSTATE 23514", err)

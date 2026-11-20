@@ -38,7 +38,7 @@ gpxtiler render -expired -zooms 6-9 -expire-dir /data/expire -tile-dir /data/til
 - `serve` draws the tiles from PostGIS. The drawing is a port of [datamaps](https://github.com/ericfischer/datamaps), so the tiles look like gps-tile.openstreetmap.org: colors by direction, GPS jumps dimmed. `/` is a small map to look at them.
 - `render` keeps the low zoom tiles on disk, like ops does with Tilekiln on vector.openstreetmap.org.
 
-## Three ideas to know
+## Four ideas to know
 
 **1. The lines are stored four times, with less detail each time.** `import -simplified-zooms 5,8,11` keeps the full lines in `trace_segments` and a simplified copy for zoom 11, 8 and 5 (`trace_segments_z11`, `_z8`, `_z5`); `update` fills the same copies: at zoom 5 a trace of 10,000 points is 20 pixels long, so the copy keeps about 20 points. A tile is always drawn from the copy closest to its zoom, so the low zooms do not read millions of points.
 
@@ -51,6 +51,8 @@ gpxtiler render -expired -zooms 6-9 -expire-dir /data/expire -tile-dir /data/til
 | 15 to 20 | `serve` on every request | no |
 
 **3. Every line has a year and a transport mode.** The year is the GPS time of the first point of the line, or the upload time when the points have no time or a wrong one (1970, a clock in the future). The mode comes from the median speed of the `<trkseg>`, with the speeds of `-mode-speeds` (default 7, 30 and 250 km/h: walk, bike, vehicle, above is plane). GPS jumps (over 1,200 km/h) and points at 0,0 are ignored. A segment with fewer than 3 timed edges takes the mode of the whole trace; unknown when the trace has none. `trace_segments` and the simplified copies are partitioned by year (`trace_segments_y2024`, `trace_segments_z8_y2024`, ...): a query with `year >= 2025` reads only the partitions of those years. The PNG tiles read every year and every mode. The vector tiles ([gpx-vector-tiles](https://github.com/Rub21/gpx-vector-tiles)) serve only recent years, one layer per mode. A database made before this change has unpartitioned tables: drop them and import again.
+
+**4. Every point keeps its altitude.** `trace_segments.geom` is a LineString with Z: the `<ele>` of the point in meters, 0 when the point has none, like `gps_points.altitude` on the website. The tiles do not use it; `/traces/{id}` gives it as the third coordinate. The simplified copies have no Z. A database made before this change has lines without Z: drop the tables and import again.
 
 ## Expire files
 
