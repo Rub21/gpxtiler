@@ -11,6 +11,7 @@ const (
 	wkbLineString      = 2
 	wkbMultiLineString = 5
 	ewkbSRIDFlag       = 0x20000000
+	ewkbZFlag          = 0x80000000
 	srid3857           = 3857
 )
 
@@ -21,6 +22,26 @@ func EWKBLineString(pts []XY) []byte {
 	b = binary.LittleEndian.AppendUint32(b, wkbLineString|ewkbSRIDFlag)
 	b = binary.LittleEndian.AppendUint32(b, srid3857)
 	return appendPoints(b, pts)
+}
+
+// EWKBLineStringZ returns a LineString with Z in EWKB with SRID 3857. ele is
+// the Z of every point, in meters; a point after the end of ele gets 0.
+func EWKBLineStringZ(pts []XY, ele []float64) []byte {
+	b := make([]byte, 0, 13+24*len(pts))
+	b = append(b, 1) // little endian
+	b = binary.LittleEndian.AppendUint32(b, wkbLineString|ewkbSRIDFlag|ewkbZFlag)
+	b = binary.LittleEndian.AppendUint32(b, srid3857)
+	b = binary.LittleEndian.AppendUint32(b, uint32(len(pts)))
+	for i, p := range pts {
+		z := 0.0
+		if i < len(ele) {
+			z = ele[i]
+		}
+		b = binary.LittleEndian.AppendUint64(b, math.Float64bits(p[0]))
+		b = binary.LittleEndian.AppendUint64(b, math.Float64bits(p[1]))
+		b = binary.LittleEndian.AppendUint64(b, math.Float64bits(z))
+	}
+	return b
 }
 
 // EWKBMultiLineString returns a MultiLineString in EWKB with SRID 3857.
@@ -46,7 +67,8 @@ func appendPoints(b []byte, pts []XY) []byte {
 	return b
 }
 
-// ParseWKBLineString reads a 2D LineString in WKB or EWKB.
+// ParseWKBLineString reads a 2D LineString in WKB or EWKB. The lines of
+// trace_segments have Z: read them with ST_Force2D.
 func ParseWKBLineString(b []byte) ([]XY, error) {
 	if len(b) < 9 {
 		return nil, errors.New("wkb too short")

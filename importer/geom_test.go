@@ -1,7 +1,9 @@
 package importer
 
 import (
+	"encoding/binary"
 	"math"
+	"slices"
 	"testing"
 	"time"
 )
@@ -127,6 +129,49 @@ func TestSimplify(t *testing.T) {
 	got := Simplify(pts, 1)
 	if len(got) != 4 || got[2] != (XY{3, 5}) {
 		t.Errorf("got %v", got)
+	}
+}
+
+// Every line keeps the altitude of its points, also at a cut: the border
+// point is in both lines with the same altitude.
+func TestBuildTrackKeepsEle(t *testing.T) {
+	pts := []Point{{Lon: 9.50, Lat: 47.1, Ele: 450.5}, {Lon: 9.51, Lat: 47.1}, {Lon: 9.52, Lat: 47.1, Ele: 460}, {Lon: 9.53, Lat: 47.1, Ele: -3}}
+	lines, _ := BuildTrack(pts, testUploaded, ModeUnknown, SplitConfig{MaxPoints: 3, MaxLength: 1e9})
+	if len(lines) != 2 {
+		t.Fatalf("lines = %+v", lines)
+	}
+	if !slices.Equal(lines[0].Ele, []float64{450.5, 0, 460}) || !slices.Equal(lines[1].Ele, []float64{460, -3}) {
+		t.Errorf("ele = %v %v", lines[0].Ele, lines[1].Ele)
+	}
+}
+
+// The point added at ±180° gets the altitude between its neighbors, or 0
+// when one of them has none.
+func TestBuildTrackDatelineEle(t *testing.T) {
+	cfg := SplitConfig{MaxPoints: 1000, MaxLength: 1e9}
+	lines, _ := BuildTrack([]Point{{Lon: 179.9, Lat: 10, Ele: 100}, {Lon: -179.9, Lat: 10, Ele: 300}}, testUploaded, ModeUnknown, cfg)
+	if len(lines) != 2 || !near(lines[0].Ele[1], 200, 0.01) || !near(lines[1].Ele[0], 200, 0.01) {
+		t.Errorf("with altitude: %+v", lines)
+	}
+	lines, _ = BuildTrack([]Point{{Lon: 179.9, Lat: 10, Ele: 100}, {Lon: -179.9, Lat: 10}}, testUploaded, ModeUnknown, cfg)
+	if len(lines) != 2 || lines[0].Ele[1] != 0 || lines[1].Ele[0] != 0 {
+		t.Errorf("one side without altitude: %+v", lines)
+	}
+}
+
+// EWKB of a LineString with Z: type 2 with the SRID and Z flags, then x, y
+// and z of every point. A missing altitude is 0.
+func TestEWKBLineStringZ(t *testing.T) {
+	b := EWKBLineStringZ([]XY{{1, 2}, {3.5, -4.25}}, []float64{450.5})
+	if len(b) != 13+24*2 {
+		t.Fatalf("%d bytes", len(b))
+	}
+	if typ := binary.LittleEndian.Uint32(b[1:5]); typ != 0xA0000002 {
+		t.Errorf("type = %#x", typ)
+	}
+	f := func(off int) float64 { return math.Float64frombits(binary.LittleEndian.Uint64(b[off:])) }
+	if f(13) != 1 || f(21) != 2 || f(29) != 450.5 || f(37) != 3.5 || f(45) != -4.25 || f(53) != 0 {
+		t.Errorf("coordinates wrong: % x", b[13:])
 	}
 }
 

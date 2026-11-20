@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -13,9 +14,12 @@ import (
 // Namespace of the osm:id and osm:tag elements in the planet-dump-ng dump.
 const osmNS = "https://www.openstreetmap.org/gpx/0.1"
 
-// Point is one <trkpt>. Time is zero when the point has no <time>.
+// Point is one <trkpt>. Time is zero when the point has no <time>. Ele is
+// the <ele> in meters, 0 when the point has none: the website stores a
+// missing altitude as 0 too (lib/gpx.rb), and the dump leaves a 0 out.
 type Point struct {
 	Lon, Lat float64
+	Ele      float64
 	Time     time.Time
 }
 
@@ -270,6 +274,17 @@ func (r *Reader) readPoint(start xml.StartElement) (Point, bool, error) {
 				// A bad time is ignored, the point is still used.
 				if t, err := time.Parse(time.RFC3339, strings.TrimSpace(s)); err == nil {
 					p.Time = t
+				}
+				continue
+			}
+			if e.Name.Local == "ele" {
+				s, err := readText(r.dec)
+				if err != nil {
+					return p, false, err
+				}
+				// A bad altitude is ignored, like a bad time.
+				if v, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil && !math.IsNaN(v) && !math.IsInf(v, 0) {
+					p.Ele = v
 				}
 				continue
 			}

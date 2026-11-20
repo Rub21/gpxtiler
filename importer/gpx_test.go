@@ -54,6 +54,12 @@ func TestReaderFixture(t *testing.T) {
 	if !t1.Segments[0][3].Time.IsZero() || t1.Segments[0][0].Time.IsZero() {
 		t.Errorf("point times wrong")
 	}
+	// <ele> of every point, 0 for the third one: it has none.
+	for i, want := range []float64{450.5, 455, 0, 460} {
+		if got := t1.Segments[0][i].Ele; got != want {
+			t.Errorf("ele of point %d = %v, want %v", i, got, want)
+		}
+	}
 	if traces[1].ID != 2 || traces[1].Name != nil || traces[1].Description != nil {
 		t.Errorf("trace 2 should have no name or desc")
 	}

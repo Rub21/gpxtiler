@@ -25,6 +25,7 @@ func ToMercator(lon, lat float64) XY {
 // Line is one row of trace_segments.
 type Line struct {
 	Points     []XY
+	Ele        []float64 // altitude of every point in meters, 0 when the point has none
 	Start, End time.Time // zero when no point has a time
 	Year       int16     // partition key: YearOf
 	Mode       Mode      // the mode of its <trkseg>
@@ -131,9 +132,14 @@ func splitDateline(pts []Point) [][]Point {
 				}
 				t := (edge - a.Lon) / (bLon - a.Lon)
 				lat := a.Lat + t*(p.Lat-a.Lat)
-				cur = append(cur, Point{Lon: edge, Lat: lat})
+				// The altitude of the new point, only when both ends have one.
+				ele := 0.0
+				if a.Ele != 0 && p.Ele != 0 {
+					ele = a.Ele + t*(p.Ele-a.Ele)
+				}
+				cur = append(cur, Point{Lon: edge, Lat: lat, Ele: ele})
 				out = append(out, cur)
-				cur = []Point{{Lon: -edge, Lat: lat}}
+				cur = []Point{{Lon: -edge, Lat: lat, Ele: ele}}
 			}
 		}
 		cur = append(cur, p)
@@ -187,8 +193,9 @@ func chunk(pts []Point, uploaded time.Time, mode Mode, maxPoints int, maxLength 
 }
 
 func makeLine(pts []Point, uploaded time.Time, mode Mode) Line {
-	l := Line{Points: project(pts), Year: YearOf(pts, uploaded), Mode: mode}
-	for _, p := range pts {
+	l := Line{Points: project(pts), Ele: make([]float64, len(pts)), Year: YearOf(pts, uploaded), Mode: mode}
+	for i, p := range pts {
+		l.Ele[i] = p.Ele
 		if p.Time.IsZero() {
 			continue
 		}
