@@ -5,7 +5,8 @@ gpxtiler loads the OpenStreetMap GPS traces into PostGIS, keeps them up to date 
 
 ```sh
 # once: load the GPX dump, with a simplified copy of the lines for zoom 5, 8 and 11
-gpxtiler import -simplified-zooms 5,8,11 -expire-dir /data/expire gpx-latest.gpx.bz2
+# and the speeds (km/h) that split walk, bike, vehicle and plane; changing them needs a new import
+gpxtiler import -simplified-zooms 5,8,11 -mode-speeds 7,30,250 -expire-dir /data/expire gpx-latest.gpx.bz2
 
 # every few minutes: new traces from the RSS feed of the website. The first run starts
 # after the highest id in the database; -start-id latest starts at the newest trace
@@ -31,13 +32,13 @@ gpxtiler render -expired -zooms 6-9 -expire-dir /data/expire -tile-dir /data/til
 
 ## How it works
 
-- `import` reads the GPX dump from [planet-dump-ng](https://github.com/zerebubuth/planet-dump-ng) (file, URL or `-` for stdin) and stores each trace as lines in PostGIS, plus a simplified copy per low zoom (`-simplified-zooms 5,8,11`), like Spyglass does.
-- `update -rss` reads the website RSS feed and downloads the new traces, like [gpx-updater](https://github.com/openstreetmap/gpx-updater) does today.
+- `import` reads the GPX dump from [planet-dump-ng](https://github.com/zerebubuth/planet-dump-ng) (file, URL or `-` for stdin) and stores each trace as lines in PostGIS, plus a simplified copy per low zoom (`-simplified-zooms 5,8,11`), like Spyglass does. The dump needs `<osm:timestamp>` per trace (planet-dump-ng#38); without it the dump time is the upload time.
+- `update -rss` reads the website RSS feed and downloads the new traces, like [gpx-updater](https://github.com/openstreetmap/gpx-updater) does today. The upload time comes from the feed; a trace that is no longer in the feed gets the download time, which is close enough for the year.
 - `update -ids` reads the daily list of identifiable trace ids (openstreetmap/chef#881), deletes the traces that are not in it and downloads the missing ones.
 - `serve` draws the tiles from PostGIS. The drawing is a port of [datamaps](https://github.com/ericfischer/datamaps), so the tiles look like gps-tile.openstreetmap.org: colors by direction, GPS jumps dimmed. `/` is a small map to look at them.
 - `render` keeps the low zoom tiles on disk, like ops does with Tilekiln on vector.openstreetmap.org.
 
-## Two ideas to know
+## Three ideas to know
 
 **1. The lines are stored four times, with less detail each time.** `import -simplified-zooms 5,8,11` keeps the full lines in `trace_segments` and a simplified copy for zoom 11, 8 and 5 (`trace_segments_z11`, `_z8`, `_z5`); `update` fills the same copies: at zoom 5 a trace of 10,000 points is 20 pixels long, so the copy keeps about 20 points. A tile is always drawn from the copy closest to its zoom, so the low zooms do not read millions of points.
 
@@ -48,6 +49,8 @@ gpxtiler render -expired -zooms 6-9 -expire-dir /data/expire -tile-dir /data/til
 | 0 to 9 | `render` in advance, or `serve` on the first request | yes |
 | 10 to 14 | `serve` on the first request | yes |
 | 15 to 20 | `serve` on every request | no |
+
+**3. Every line has a year and a transport mode.** The year is the GPS time of the first point of the line, or the upload time when the points have no time or a wrong one (1970, a clock in the future). The mode comes from the median speed of the `<trkseg>`, with the speeds of `-mode-speeds` (default 7, 30 and 250 km/h: walk, bike, vehicle, above is plane). GPS jumps (over 1,200 km/h) and points at 0,0 are ignored. A segment with fewer than 3 timed edges takes the mode of the whole trace; unknown when the trace has none. `trace_segments` and the simplified copies are partitioned by year (`trace_segments_y2024`, `trace_segments_z8_y2024`, ...): a query with `year >= 2025` reads only the partitions of those years. The PNG tiles read every year and every mode. The vector tiles ([gpx-vector-tiles](https://github.com/Rub21/gpx-vector-tiles)) serve only recent years, one layer per mode. A database made before this change has unpartitioned tables: drop them and import again.
 
 ## Expire files
 

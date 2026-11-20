@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 const gpx11 = `<?xml version="1.0" encoding="UTF-8"?>
@@ -73,21 +74,26 @@ func rssFeed(ids ...int64) string {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>t</title>`)
 	for _, id := range ids {
-		fmt.Fprintf(&b, `<item><title>x</title><link>https://www.openstreetmap.org/user/A%%20B/traces/%d</link></item>`, id)
+		fmt.Fprintf(&b, `<item><title>x</title><link>https://www.openstreetmap.org/user/A%%20B/traces/%d</link><pubDate>Thu, 12 Nov 2026 21:08:54 +0000</pubDate></item>`, id)
 	}
 	b.WriteString(`</channel></rss>`)
 	return b.String()
 }
 
-func TestMaxRSSID(t *testing.T) {
-	max, err := MaxRSSID(strings.NewReader(rssFeed(105, 110, 99)))
+func TestReadRSS(t *testing.T) {
+	max, uploaded, err := ReadRSS(strings.NewReader(rssFeed(105, 110, 99)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if max != 110 {
 		t.Errorf("max = %d, want 110", max)
 	}
-	if _, err := MaxRSSID(strings.NewReader(rssFeed())); err == nil {
+	// rssFeed gives every item the same pubDate.
+	want := time.Date(2026, 11, 12, 21, 8, 54, 0, time.UTC)
+	if len(uploaded) != 3 || !uploaded[105].Equal(want) {
+		t.Errorf("uploaded = %v", uploaded)
+	}
+	if _, _, err := ReadRSS(strings.NewReader(rssFeed())); err == nil {
 		t.Error("empty feed should fail")
 	}
 }
@@ -164,6 +170,15 @@ func TestRunRSS(t *testing.T) {
 	if n := count(t, conn, "SELECT count(*) FROM trace_segments WHERE gpx_id = 102"); n != 1 {
 		t.Errorf("trace 102 has %d segments, want 1", n)
 	}
+	// 102 and 104 are in the feed: pubDate 2026-11-12.
+	// gpx11 (102) has GPS times in 2013, before the upload: year 2013.
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments WHERE gpx_id = 102 AND year = 2013"); n != 1 {
+		t.Errorf("trace 102 should have year 2013")
+	}
+	// gpx10 (104) has no times: the upload year from the feed.
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments WHERE gpx_id = 104 AND year = 2026"); n != 1 {
+		t.Errorf("trace 104 should have year 2026")
+	}
 	if n := count(t, conn, "SELECT last_id FROM rss_state"); n != 104 {
 		t.Errorf("last_id = %d, want 104", n)
 	}
@@ -175,6 +190,29 @@ func TestRunRSS(t *testing.T) {
 	st, err = RunRSS(ctx, conn, f, cfg, rc)
 	if err != nil || st.Checked != 0 {
 		t.Fatalf("second run: %+v, %v", st, err)
+	}
+}
+
+// A trace that is not in the feed gets the download time: the current year.
+func TestRunRSSNotInFeed(t *testing.T) {
+	conn := testConn(t)
+	ctx := context.Background()
+	cfg := testConfig(t.TempDir())
+	if _, err := Run(ctx, conn, dump("2026-10-31T00:00:00Z", trk(100, "")), cfg); err != nil {
+		t.Fatal(err)
+	}
+	// The feed only lists 104: 101 is behind.
+	srv := fakeSite(t, []int64{104}, map[int64]string{101: gpx10, 104: gpx10}, nil)
+	f := NewFetcher(srv.URL)
+	f.Delay = 0
+	if _, err := RunRSS(ctx, conn, f, cfg, DefaultRSSConfig()); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments WHERE gpx_id = 101 AND year = extract(year FROM now())"); n != 1 {
+		t.Errorf("trace 101 should have the current year")
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments WHERE gpx_id = 104 AND year = 2026"); n != 1 {
+		t.Errorf("trace 104 should have year 2026 from the feed")
 	}
 }
 
@@ -262,5 +300,38 @@ func TestRunRSSEmptyDatabase(t *testing.T) {
 	f.Delay = 0
 	if _, err := RunRSS(context.Background(), conn, f, testConfig(t.TempDir()), DefaultRSSConfig()); err == nil {
 		t.Fatal("want an error on an empty database")
+	}
+}
+
+// update classifies with the speeds stored by import: with 1,2,3 km/h a
+// trace at about 20 km/h is a plane.
+func TestRunRSSUsesStoredSpeeds(t *testing.T) {
+	conn := testConn(t)
+	ctx := context.Background()
+	cfg := testConfig(t.TempDir())
+	if _, err := Run(ctx, conn, dump("2026-10-31T00:00:00Z", trk(100, "")), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, "UPDATE dump_state SET mode_speeds = '1,2,3'"); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := LoadModeSpeeds(ctx, conn)
+	if err != nil || ms.String() != "1,2,3" {
+		t.Fatalf("LoadModeSpeeds = %v, %v", ms, err)
+	}
+	// Five points, 10 s apart, about 20 km/h (about 55 m each).
+	body := `<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1"><trk><trkseg>`
+	for i := 0; i < 5; i++ {
+		body += fmt.Sprintf(`<trkpt lat="47.1" lon="%.6f"><time>2013-08-01T10:00:%02dZ</time></trkpt>`, 9.5+float64(i)*0.00073, i*10)
+	}
+	body += `</trkseg></trk></gpx>`
+	srv := fakeSite(t, []int64{101}, map[int64]string{101: body}, nil)
+	f := NewFetcher(srv.URL)
+	f.Delay = 0
+	if _, err := RunRSS(ctx, conn, f, cfg, DefaultRSSConfig()); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments WHERE gpx_id = 101 AND mode = 4"); n != 1 {
+		t.Errorf("trace 101 should be a plane with the stored speeds")
 	}
 }

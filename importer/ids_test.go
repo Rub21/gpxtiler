@@ -57,6 +57,25 @@ func TestRunIDs(t *testing.T) {
 	}
 }
 
+// A new trace with no GPS time gets the download time: the current year.
+func TestRunIDsYear(t *testing.T) {
+	conn := testConn(t)
+	ctx := context.Background()
+	cfg := testConfig(t.TempDir())
+	if _, err := Run(ctx, conn, dump("2026-10-31T00:00:00Z", trk(100, "")), cfg); err != nil {
+		t.Fatal(err)
+	}
+	srv := fakeSite(t, nil, map[int64]string{103: gpx10}, nil)
+	f := NewFetcher(srv.URL)
+	f.Delay = 0
+	if _, err := RunIDs(ctx, conn, f, []int64{100, 103}, cfg, DefaultIDsConfig()); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments WHERE gpx_id = 103 AND year = extract(year FROM now())"); n != 1 {
+		t.Errorf("trace 103 should have the current year")
+	}
+}
+
 // A list that would delete most traces stops before any change.
 func TestRunIDsMaxDelete(t *testing.T) {
 	conn := testConn(t)

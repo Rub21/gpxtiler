@@ -57,6 +57,12 @@ func TestReaderFixture(t *testing.T) {
 	if traces[1].ID != 2 || traces[1].Name != nil || traces[1].Description != nil {
 		t.Errorf("trace 2 should have no name or desc")
 	}
+	if want := time.Date(2013, 8, 1, 11, 0, 0, 0, time.UTC); !t1.Uploaded.Equal(want) {
+		t.Errorf("uploaded = %s, want %s", t1.Uploaded, want)
+	}
+	if !traces[1].Uploaded.IsZero() {
+		t.Errorf("trace 2 should have no upload time")
+	}
 	if traces[3].Tags[0] != "a<b" {
 		t.Errorf("tag = %q", traces[3].Tags[0])
 	}

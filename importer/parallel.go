@@ -11,6 +11,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -127,19 +128,29 @@ func buildRows(t *Trace, cfg SplitConfig) *parsed {
 	p := &parsed{t: t}
 	var seg bytes.Buffer
 	low := map[int]*bytes.Buffer{}
+	// Trace mode: the median over every segment, for the segments that are
+	// too short to have their own.
+	var all []float64
+	for _, pts := range t.Segments {
+		all = append(all, edgeSpeeds(validPoints(pts), t.Uploaded)...)
+	}
+	traceMode, _ := modeOfSpeeds(all, cfg.Speeds) // ModeUnknown when the trace has fewer than 3
 	for trackid, pts := range t.Segments {
-		lines, lowParts := BuildTrack(pts, cfg)
+		lines, lowGroups := BuildTrack(pts, t.Uploaded, traceMode, cfg)
 		for i, l := range lines {
-			fmt.Fprintf(&seg, "%d\t%d\t%d\t%s\t%s\t%s\n", t.ID, trackid, i,
+			fmt.Fprintf(&seg, "%d\t%d\t%d\t%d\t%d\t%s\t%s\t%s\n", t.ID, trackid, i, l.Year, l.Mode,
 				hex.EncodeToString(EWKBLineString(l.Points)), copyTime(l.Start), copyTime(l.End))
 			p.n++
 		}
 		p.lines = append(p.lines, lines...)
-		for z, parts := range lowParts {
+		for z, groups := range lowGroups {
 			if low[z] == nil {
 				low[z] = &bytes.Buffer{}
 			}
-			fmt.Fprintf(low[z], "%d\t%d\t%s\n", t.ID, trackid, hex.EncodeToString(EWKBMultiLineString(parts)))
+			for key, parts := range groups {
+				fmt.Fprintf(low[z], "%d\t%d\t%d\t%d\t%s\n", t.ID, trackid, key.Year, key.Mode,
+					hex.EncodeToString(EWKBMultiLineString(parts)))
+			}
 		}
 	}
 	p.segRows = seg.Bytes()
@@ -153,8 +164,9 @@ func buildRows(t *Trace, cfg SplitConfig) *parsed {
 }
 
 // parseAll reads the traces of ds with workers goroutines and sends them
-// to out, in any order. It closes out when the dump is done.
-func parseAll(ctx context.Context, ds *dumpStream, workers int, skipGeom func(int64) bool, cfg SplitConfig, out chan<- *parsed) error {
+// to out, in any order. It closes out when the dump is done. uploaded is
+// the upload time for traces without <osm:timestamp>: the dump time.
+func parseAll(ctx context.Context, ds *dumpStream, workers int, skipGeom func(int64) bool, cfg SplitConfig, uploaded time.Time, out chan<- *parsed) error {
 	g, ctx := errgroup.WithContext(ctx)
 	chunks := make(chan []byte, workers)
 	g.Go(func() error {
@@ -180,6 +192,9 @@ func parseAll(ctx context.Context, ds *dumpStream, workers int, skipGeom func(in
 				t, err := parseChunk(ds.gpxStart, chunk, skipGeom)
 				if err != nil {
 					return fmt.Errorf("reading dump: %w", err)
+				}
+				if t.Uploaded.IsZero() {
+					t.Uploaded = uploaded
 				}
 				select {
 				case out <- buildRows(t, cfg):

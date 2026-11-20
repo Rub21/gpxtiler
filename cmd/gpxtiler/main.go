@@ -343,6 +343,17 @@ func runImport(args []string) error {
 			log.Fatalf("GPXTILER_SIMPLIFIED_ZOOMS: %v", err)
 		}
 	}
+	fs.Func("mode-speeds", "upper speed in km/h of walk, bike and vehicle, above is plane; update reads them from the database (env GPXTILER_MODE_SPEEDS, default 7,30,250)", func(s string) error {
+		var err error
+		cfg.Speeds, err = importer.ParseModeSpeeds(s)
+		return err
+	})
+	if v := os.Getenv("GPXTILER_MODE_SPEEDS"); v != "" {
+		var err error
+		if cfg.Speeds, err = importer.ParseModeSpeeds(v); err != nil {
+			log.Fatalf("GPXTILER_MODE_SPEEDS: %v", err)
+		}
+	}
 	fs.Float64Var(&cfg.MaxDeleteRatio, "max-delete-ratio", cfg.MaxDeleteRatio, "stop if more than this share of traces would be deleted, 0 to disable")
 	fs.IntVar(&cfg.Workers, "workers", cfg.Workers, "goroutines parsing the dump (default: the number of cores, up to 8)")
 	fs.Parse(args)

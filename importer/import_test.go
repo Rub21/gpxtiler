@@ -2,6 +2,7 @@ package importer
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Rub21/gpxtiler/schema"
 )
@@ -133,6 +135,15 @@ func TestImportSync(t *testing.T) {
 	if n := count(t, conn, "SELECT count(*) FROM trace_segments WHERE gpx_id = 1 AND ST_NPoints(geom) = 4 AND ST_SRID(geom) = 3857 AND started_at IS NOT NULL"); n != 1 {
 		t.Errorf("trace 1 segment is wrong")
 	}
+	// Trace 1: GPS time 2013-08-01, uploaded 2013-08-01 11:00. Three timed
+	// points 10 s apart, about 134 m each: 48 km/h, but only 2 timed edges,
+	// so unknown.
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments_y2013 WHERE gpx_id = 1 AND year = 2013 AND mode = 0"); n != 1 {
+		t.Errorf("trace 1 should be in the 2013 partition with mode unknown")
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments_z8_y2013 WHERE gpx_id = 1 AND mode = 0"); n != 1 {
+		t.Errorf("trace 1 low copy should be in the 2013 partition")
+	}
 
 	// Same dump again: nothing new, nothing deleted.
 	f.Seek(0, io.SeekStart)
@@ -151,6 +162,16 @@ func TestImportSync(t *testing.T) {
 	}
 	if st.Inserted != 2 || st.Updated != 3 || st.Deleted != 1 {
 		t.Errorf("sync stats = %+v", st)
+	}
+	// Trace 9 has no <osm:timestamp>: the dump time (2013-08-08) is the
+	// upload time. Its GPS time 2020 is after the upload, so it is not
+	// trusted: the upload year 2013.
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments_y2013 WHERE gpx_id = 9"); n != 1 {
+		t.Errorf("trace 9 should be in the 2013 partition")
+	}
+	// Trace 10 has no times: the dump year.
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments_y2013 WHERE gpx_id = 10"); n != 2 {
+		t.Errorf("trace 10 should have 2 lines in the 2013 partition")
 	}
 	conn.QueryRow(ctx, "SELECT name FROM traces WHERE gpx_id = 1").Scan(&name)
 	if name != "Evening ride" {
@@ -235,6 +256,87 @@ func TestImportKeepsNewerTraces(t *testing.T) {
 	}
 	if n := count(t, conn, "SELECT count(*) FROM traces WHERE gpx_id IN (1, 3, 10, 50)"); n != 4 {
 		t.Errorf("%d of 1, 3, 10, 50 left, want 4", n)
+	}
+}
+
+func TestEnsureYears(t *testing.T) {
+	conn := testConn(t)
+	ctx := context.Background()
+	if err := EnsureLowTables(ctx, conn, []int{8}); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureYears(ctx, conn, []int{8}, 2019, 2020); err != nil {
+		t.Fatal(err)
+	}
+	// Twice is fine.
+	if err := EnsureYears(ctx, conn, []int{8}, 2019, 2020); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"trace_segments_y2019", "trace_segments_y2020", "trace_segments_z8_y2019", "trace_segments_z8_y2020"} {
+		if n := count(t, conn, "SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = $1", name); n != 1 {
+			t.Errorf("table %s missing", name)
+		}
+	}
+	// The partitions are not simplified copies.
+	zooms, err := LowZooms(ctx, conn)
+	if err != nil || len(zooms) != 1 || zooms[0] != 8 {
+		t.Errorf("LowZooms = %v, %v", zooms, err)
+	}
+	// A row of 2019 goes to the 2019 partition.
+	_, err = conn.Exec(ctx, `INSERT INTO trace_segments (gpx_id, trackid, segment, year, mode, geom)
+		VALUES (1, 0, 0, 2019, 1, ST_SetSRID(ST_MakeLine(ST_MakePoint(0, 0), ST_MakePoint(1, 1)), 3857))`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments_y2019"); n != 1 {
+		t.Errorf("rows in 2019 partition = %d", n)
+	}
+	// A year without a partition fails: import must create them first.
+	_, err = conn.Exec(ctx, `INSERT INTO trace_segments (gpx_id, trackid, segment, year, mode, geom)
+		VALUES (1, 0, 1, 2021, 1, ST_SetSRID(ST_MakeLine(ST_MakePoint(0, 0), ST_MakePoint(1, 1)), 3857))`)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+		t.Errorf("insert into a year without partition: got %v, want SQLSTATE 23514", err)
+	}
+}
+
+// The speeds of the first load are saved. Another import with other speeds
+// is refused: the modes of the loaded lines would not match.
+func TestImportSavesModeSpeeds(t *testing.T) {
+	conn := testConn(t)
+	ctx := context.Background()
+	cfg := testConfig(t.TempDir())
+	if _, err := Run(ctx, conn, dump("2026-10-31T00:00:00Z", trk(100, "")), cfg); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := conn.QueryRow(ctx, "SELECT mode_speeds FROM dump_state").Scan(&got); err != nil || got != "7,30,250" {
+		t.Fatalf("mode_speeds = %q, %v", got, err)
+	}
+	ms, err := LoadModeSpeeds(ctx, conn)
+	if err != nil || ms != DefaultModeSpeeds() {
+		t.Errorf("LoadModeSpeeds = %v, %v", ms, err)
+	}
+
+	cfg.Speeds = ModeSpeeds{Walk: 5 / 3.6, Bike: 25 / 3.6, Vehicle: 200 / 3.6}
+	_, err = Run(ctx, conn, dump("2026-11-01T00:00:00Z", trk(100, "")), cfg)
+	if err == nil || !strings.Contains(err.Error(), "drop the tables and import again") {
+		t.Errorf("second run with other speeds: err = %v", err)
+	}
+}
+
+// No row or NULL: the default speeds.
+func TestLoadModeSpeedsDefault(t *testing.T) {
+	conn := testConn(t)
+	ctx := context.Background()
+	if ms, err := LoadModeSpeeds(ctx, conn); err != nil || ms != DefaultModeSpeeds() {
+		t.Errorf("no row: %v, %v", ms, err)
+	}
+	if _, err := conn.Exec(ctx, "INSERT INTO dump_state (id, timestamp) VALUES (true, now())"); err != nil {
+		t.Fatal(err)
+	}
+	if ms, err := LoadModeSpeeds(ctx, conn); err != nil || ms != DefaultModeSpeeds() {
+		t.Errorf("NULL: %v, %v", ms, err)
 	}
 }
 

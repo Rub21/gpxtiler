@@ -90,6 +90,12 @@ func RunIDs(ctx context.Context, conn *pgx.Conn, f *Fetcher, list []int64, cfg C
 	if cfg.LowZooms, err = LowZooms(ctx, conn); err != nil {
 		return st, err
 	}
+	if cfg.Speeds, err = LoadModeSpeeds(ctx, conn); err != nil {
+		return st, err
+	}
+	if err := ensureYearsToNow(ctx, conn, cfg.LowZooms); err != nil {
+		return st, err
+	}
 	dbIDs, err := loadIDs(ctx, conn)
 	if err != nil {
 		return st, err
@@ -159,7 +165,10 @@ func RunIDs(ctx context.Context, conn *pgx.Conn, f *Fetcher, list []int64, cfg C
 			st.Skipped++
 			continue
 		}
-		st.Segments += b.addNew(&Trace{ID: id, Segments: segs}, split, exp)
+		// The original file has no upload time. These traces were uploaded
+		// after the dump, so now is close enough for the year.
+		uploaded := time.Now()
+		st.Segments += b.addNew(&Trace{ID: id, Uploaded: uploaded, Segments: segs}, split, exp)
 		st.Inserted++
 		if b.count >= cfg.BatchSize {
 			if err := b.flush(ctx, conn, exp); err != nil {

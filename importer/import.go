@@ -27,13 +27,14 @@ import (
 
 // Config holds the import options.
 type Config struct {
-	BatchSize      int     // traces per transaction
-	MaxPoints      int     // cut lines after this many points
-	MaxLength      float64 // or after this many meters
-	LowZooms       []int   // simplified copies trace_segments_z<N>, one per zoom, for the low zoom tiles
-	LowMaxJump     float64 // the simplified copies are cut at edges longer than this many meters
-	ExpireDir      string  // "" disables expire files
-	ExpireMinZoom  int     // expire files have the tiles from ExpireMinZoom to ExpireMaxZoom
+	BatchSize      int        // traces per transaction
+	MaxPoints      int        // cut lines after this many points
+	MaxLength      float64    // or after this many meters
+	LowZooms       []int      // simplified copies trace_segments_z<N>, one per zoom, for the low zoom tiles
+	LowMaxJump     float64    // the simplified copies are cut at edges longer than this many meters
+	Speeds         ModeSpeeds // upper speeds of walk, bike and vehicle; update reads them from dump_state
+	ExpireDir      string     // "" disables expire files
+	ExpireMinZoom  int        // expire files have the tiles from ExpireMinZoom to ExpireMaxZoom
 	ExpireMaxZoom  int
 	MaxDeleteRatio float64 // stop if the run would delete more than this share of traces
 	Workers        int     // goroutines parsing the dump
@@ -48,6 +49,7 @@ func DefaultConfig() Config {
 		MaxLength:      50000,
 		LowZooms:       []int{5, 8, 11},
 		LowMaxJump:     2000,
+		Speeds:         DefaultModeSpeeds(),
 		ExpireMinZoom:  0,
 		ExpireMaxZoom:  14,
 		MaxDeleteRatio: 0.5,
@@ -80,7 +82,8 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 	st.DumpTime = rd.DumpTime
 
 	var last time.Time
-	err = conn.QueryRow(ctx, "SELECT timestamp FROM dump_state").Scan(&last)
+	var savedSpeeds *string
+	err = conn.QueryRow(ctx, "SELECT timestamp, mode_speeds FROM dump_state").Scan(&last, &savedSpeeds)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		st.FirstLoad = true
@@ -89,9 +92,15 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 	case rd.DumpTime.Before(last):
 		return st, fmt.Errorf("dump time %s is older than the loaded dump %s",
 			rd.DumpTime.Format(time.RFC3339), last.Format(time.RFC3339))
+	case savedSpeeds != nil && *savedSpeeds != cfg.Speeds.String():
+		return st, fmt.Errorf("the database was imported with -mode-speeds %s, not %s; drop the tables and import again",
+			*savedSpeeds, cfg.Speeds.String())
 	}
 
 	if err := EnsureLowTables(ctx, conn, cfg.LowZooms); err != nil {
+		return st, err
+	}
+	if err := ensureYearsToNow(ctx, conn, cfg.LowZooms); err != nil {
 		return st, err
 	}
 	// id -> seen in this dump
@@ -132,7 +141,7 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 	var parseErr error
 	parseDone := make(chan struct{})
 	go func() {
-		parseErr = parseAll(pctx, ds, cfg.Workers, skipGeom, cfg.split(), parsedCh)
+		parseErr = parseAll(pctx, ds, cfg.Workers, skipGeom, cfg.split(), rd.DumpTime, parsedCh)
 		close(parseDone)
 	}()
 	fail := func(err error) (Stats, error) {
@@ -205,8 +214,9 @@ func Run(ctx context.Context, conn *pgx.Conn, in io.Reader, cfg Config) (Stats, 
 		return st, err
 	}
 
-	_, err = conn.Exec(ctx, `INSERT INTO dump_state (id, timestamp) VALUES (true, $1)
-		ON CONFLICT (id) DO UPDATE SET timestamp = EXCLUDED.timestamp`, rd.DumpTime)
+	_, err = conn.Exec(ctx, `INSERT INTO dump_state (id, timestamp, mode_speeds) VALUES (true, $1, $2)
+		ON CONFLICT (id) DO UPDATE SET timestamp = EXCLUDED.timestamp, mode_speeds = EXCLUDED.mode_speeds`,
+		rd.DumpTime, cfg.Speeds.String())
 	if err != nil {
 		return st, err
 	}
@@ -230,7 +240,7 @@ func loadIDs(ctx context.Context, conn *pgx.Conn) (map[int64]bool, error) {
 }
 
 func (c Config) split() SplitConfig {
-	return SplitConfig{MaxPoints: c.MaxPoints, MaxLength: c.MaxLength, LowZooms: c.LowZooms, LowMaxJump: c.LowMaxJump}
+	return SplitConfig{MaxPoints: c.MaxPoints, MaxLength: c.MaxLength, LowZooms: c.LowZooms, LowMaxJump: c.LowMaxJump, Speeds: c.Speeds}
 }
 
 // LowTable is the name of the simplified copy for a low zoom.
@@ -246,6 +256,53 @@ func LowZooms(ctx context.Context, conn *pgx.Conn) ([]int, error) {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, pgx.RowTo[int])
+}
+
+// LoadModeSpeeds returns the speeds of the import, from dump_state. No row
+// or no value: the defaults.
+func LoadModeSpeeds(ctx context.Context, conn *pgx.Conn) (ModeSpeeds, error) {
+	var s *string
+	err := conn.QueryRow(ctx, "SELECT mode_speeds FROM dump_state").Scan(&s)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && s == nil) {
+		return DefaultModeSpeeds(), nil
+	}
+	if err != nil {
+		return ModeSpeeds{}, err
+	}
+	return ParseModeSpeeds(*s)
+}
+
+// MinYear is the first partition. GPS times before it are not trusted
+// (see validTime), so no row gets an older year.
+const MinYear = 2000
+
+// YearPartition is the name of the partition of table for one year.
+func YearPartition(table string, year int) string {
+	return fmt.Sprintf("%s_y%d", table, year)
+}
+
+// EnsureYears creates the partitions of trace_segments and of the
+// simplified copies for zooms, from year from to year to. A row with a
+// year without partition fails to insert, so import and update call this
+// up to the next year before writing.
+func EnsureYears(ctx context.Context, conn *pgx.Conn, zooms []int, from, to int) error {
+	tables := []string{"trace_segments"}
+	for _, z := range zooms {
+		tables = append(tables, LowTable(z))
+	}
+	var sql strings.Builder
+	for y := from; y <= to; y++ {
+		for _, t := range tables {
+			fmt.Fprintf(&sql, "CREATE TABLE IF NOT EXISTS %s PARTITION OF %s FOR VALUES FROM (%d) TO (%d);\n",
+				YearPartition(t, y), t, y, y+1)
+		}
+	}
+	return execMulti(ctx, conn.PgConn(), sql.String())
+}
+
+// ensureYearsToNow creates the partitions from MinYear to next year.
+func ensureYearsToNow(ctx context.Context, conn *pgx.Conn, zooms []int) error {
+	return EnsureYears(ctx, conn, zooms, MinYear, time.Now().UTC().Year()+1)
 }
 
 // EnsureLowTables creates the simplified copies for zooms. When the
@@ -275,9 +332,11 @@ func EnsureLowTables(ctx context.Context, conn *pgx.Conn, zooms []int) error {
 			CREATE TABLE IF NOT EXISTS %[1]s (
 				gpx_id  bigint,
 				trackid int,
+				year    smallint NOT NULL,
+				mode    smallint NOT NULL,
 				geom    geometry(MultiLineString, 3857),
-				PRIMARY KEY (gpx_id, trackid)
-			);
+				PRIMARY KEY (gpx_id, trackid, year, mode)
+			) PARTITION BY RANGE (year);
 			CREATE INDEX IF NOT EXISTS %[1]s_geom_idx ON %[1]s USING gist (geom)`, LowTable(z)))
 		if err != nil {
 			return err
@@ -438,11 +497,11 @@ func (b *batch) flush(ctx context.Context, conn *pgx.Conn, exp *Expire) error {
 	if err := copyIn("trace_tags (gpx_id, tag)", &b.tags); err != nil {
 		return err
 	}
-	if err := copyIn("trace_segments (gpx_id, trackid, segment, geom, started_at, ended_at)", &b.segments); err != nil {
+	if err := copyIn("trace_segments (gpx_id, trackid, segment, year, mode, geom, started_at, ended_at)", &b.segments); err != nil {
 		return err
 	}
 	for z, buf := range b.low {
-		if err := copyIn(LowTable(z)+" (gpx_id, trackid, geom)", buf); err != nil {
+		if err := copyIn(LowTable(z)+" (gpx_id, trackid, year, mode, geom)", buf); err != nil {
 			return err
 		}
 	}
