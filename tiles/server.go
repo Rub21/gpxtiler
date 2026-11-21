@@ -140,9 +140,11 @@ func (s *Server) trace(w http.ResponseWriter, r *http.Request) {
 	var segments int
 	var points int64
 	var geom *string
+	// The altitude is stored on a grid of 1/128 m: 9.3 m is 9.296875. The
+	// last ST_SnapToGrid rounds only Z to 2 decimals, the ones of <ele>.
 	err = s.Renderer.Pool.QueryRow(r.Context(), `
 		SELECT t.name, count(s.geom), coalesce(sum(ST_NPoints(s.geom)), 0),
-		       ST_AsGeoJSON(ST_Multi(ST_SimplifyPreserveTopology(ST_Collect(ST_Transform(s.geom, 4326) ORDER BY s.trackid, s.segment), 0.00001)), 6)
+		       ST_AsGeoJSON(ST_SnapToGrid(ST_Multi(ST_SimplifyPreserveTopology(ST_Collect(ST_Transform(s.geom, 4326) ORDER BY s.trackid, s.segment), 0.00001)), ST_MakePoint(0, 0, 0, 0), 0, 0, 0.01, 0), 6)
 		FROM traces t
 		LEFT JOIN trace_segments s ON s.gpx_id = t.gpx_id
 		WHERE t.gpx_id = $1
