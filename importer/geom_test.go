@@ -315,3 +315,13 @@ func TestBuildTrackNoTimes(t *testing.T) {
 		t.Errorf("low = %v", lows[8])
 	}
 }
+
+func TestParseWKBLineStringZ(t *testing.T) {
+	pts, ele, err := ParseWKBLineStringZ(EWKBLineStringZ([]XY{{1, 2}, {3.5, -4.25}}, []float64{450.5, 7}))
+	if err != nil || len(pts) != 2 || pts[1] != (XY{3.5, -4.25}) || ele[0] != 450.5 || ele[1] != 7 {
+		t.Errorf("got %v %v %v", pts, ele, err)
+	}
+	if _, _, err := ParseWKBLineStringZ(EWKBLineString([]XY{{1, 2}, {3, 4}})); err == nil {
+		t.Errorf("a 2D line should not be read as a line with Z")
+	}
+}

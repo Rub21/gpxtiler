@@ -88,10 +88,22 @@ func appendPoints(b []byte, pts []XY) []byte {
 }
 
 // ParseWKBLineString reads a 2D LineString in WKB or EWKB. The lines of
-// trace_segments have Z: read them with ST_Force2D.
+// trace_segments have Z: read them with ST_Force2D, or with
+// ParseWKBLineStringZ.
 func ParseWKBLineString(b []byte) ([]XY, error) {
+	pts, _, err := parseLineString(b, false)
+	return pts, err
+}
+
+// ParseWKBLineStringZ reads a LineString with Z in EWKB. ele is the Z of
+// every point.
+func ParseWKBLineStringZ(b []byte) (pts []XY, ele []float64, err error) {
+	return parseLineString(b, true)
+}
+
+func parseLineString(b []byte, z bool) ([]XY, []float64, error) {
 	if len(b) < 9 {
-		return nil, errors.New("wkb too short")
+		return nil, nil, errors.New("wkb too short")
 	}
 	var bo binary.ByteOrder = binary.LittleEndian
 	if b[0] == 0 {
@@ -102,22 +114,33 @@ func ParseWKBLineString(b []byte) ([]XY, error) {
 	if typ&ewkbSRIDFlag != 0 {
 		off += 4
 	}
-	if typ&^ewkbSRIDFlag != wkbLineString {
-		return nil, fmt.Errorf("wkb type %#x is not a 2D LineString", typ)
+	want, size := uint32(wkbLineString), 16
+	if z {
+		want, size = wkbLineString|ewkbZFlag, 24
+	}
+	if typ&^ewkbSRIDFlag != want {
+		return nil, nil, fmt.Errorf("wkb type %#x is not a LineString with %d coordinates", typ, size/8)
 	}
 	if len(b) < off+4 {
-		return nil, errors.New("wkb too short")
+		return nil, nil, errors.New("wkb too short")
 	}
 	n := int(bo.Uint32(b[off:]))
 	off += 4
-	if len(b) < off+16*n {
-		return nil, errors.New("wkb too short")
+	if len(b) < off+size*n {
+		return nil, nil, errors.New("wkb too short")
 	}
 	pts := make([]XY, n)
+	var ele []float64
+	if z {
+		ele = make([]float64, n)
+	}
 	for i := range pts {
 		pts[i][0] = math.Float64frombits(bo.Uint64(b[off:]))
 		pts[i][1] = math.Float64frombits(bo.Uint64(b[off+8:]))
-		off += 16
+		if z {
+			ele[i] = math.Float64frombits(bo.Uint64(b[off+16:]))
+		}
+		off += size
 	}
-	return pts, nil
+	return pts, ele, nil
 }

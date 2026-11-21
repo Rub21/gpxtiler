@@ -10,6 +10,7 @@ import (
 	"image"
 	"image/png"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,6 +18,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/sync/singleflight"
+
+	"github.com/Rub21/gpxtiler/importer"
 )
 
 //go:embed viewer.html
@@ -36,7 +39,11 @@ type Server struct {
 	TileDir   string        // "" when there are no tiles on disk
 	MaxAge    time.Duration // Cache-Control max-age
 	Timeout   time.Duration // stop drawing a tile after this time
-	Log       *log.Logger
+	// TraceMaxPoints: /traces/{id} answers 413 for a trace with more points,
+	// so one request cannot make the database read millions of points.
+	// 0 turns /traces/{id} off.
+	TraceMaxPoints int
+	Log            *log.Logger
 
 	sem    chan struct{}      // limits the tiles drawn at the same time
 	single singleflight.Group // one draw per tile when many ask for it
@@ -53,7 +60,9 @@ func (s *Server) Handler(maxRenders int) http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /lines/{z}/{x}/{y}", s.tile)
-	mux.HandleFunc("GET /traces/{id}", s.trace)
+	if s.TraceMaxPoints > 0 {
+		mux.HandleFunc("GET /traces/{id}", s.trace)
+	}
 	// A small map to look at the tiles.
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -126,9 +135,11 @@ func (s *Server) tile(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-// trace answers /traces/{id} with the lines of a trace as a GeoJSON
-// Feature (simplified to about a meter), so the viewer can draw them and
-// show what was loaded: 404 when the trace is not in the database.
+// trace answers /traces/{id} with the trace as a GeoJSON Feature: the same
+// lines and points as the GPX file, one line per <trkseg>, with the altitude
+// as the third coordinate. The viewer draws it and shows what was loaded.
+// 404 when the trace is not in the database, 413 when it has more points
+// than TraceMaxPoints.
 func (s *Server) trace(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -137,23 +148,78 @@ func (s *Server) trace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var name *string
-	var segments int
 	var points int64
-	var geom *string
-	// The altitude is stored on a grid of 1/128 m: 9.3 m is 9.296875. The
-	// last ST_SnapToGrid rounds only Z to 2 decimals, the ones of <ele>.
+	// Count the points first. It only reads the start of each row, so it is
+	// cheap also for the biggest trace.
 	err = s.Renderer.Pool.QueryRow(r.Context(), `
-		SELECT t.name, count(s.geom), coalesce(sum(ST_NPoints(s.geom)), 0),
-		       ST_AsGeoJSON(ST_SnapToGrid(ST_Multi(ST_SimplifyPreserveTopology(ST_Collect(ST_Transform(s.geom, 4326) ORDER BY s.trackid, s.segment), 0.00001)), ST_MakePoint(0, 0, 0, 0), 0, 0, 0.01, 0), 6)
+		SELECT t.name, coalesce(sum(ST_NPoints(s.geom)), 0)
 		FROM traces t
 		LEFT JOIN trace_segments s ON s.gpx_id = t.gpx_id
 		WHERE t.gpx_id = $1
-		GROUP BY t.gpx_id, t.name`, id).
-		Scan(&name, &segments, &points, &geom)
+		GROUP BY t.gpx_id, t.name`, id).Scan(&name, &points)
 	if errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, "trace not loaded", http.StatusNotFound)
 		return
 	}
+	if err != nil {
+		s.Log.Printf("trace %d: %v", id, err)
+		http.Error(w, "database error", http.StatusServiceUnavailable)
+		return
+	}
+	if points > int64(s.TraceMaxPoints) {
+		http.Error(w, fmt.Sprintf("trace %d has %d points, the limit is %d", id, points, s.TraceMaxPoints), http.StatusRequestEntityTooLarge)
+		return
+	}
+	rows, err := s.Renderer.Pool.Query(r.Context(), `
+		SELECT trackid, ST_AsEWKB(ST_Transform(geom, 4326))
+		FROM trace_segments
+		WHERE gpx_id = $1
+		ORDER BY trackid, segment`, id)
+	if err != nil {
+		s.Log.Printf("trace %d: %v", id, err)
+		http.Error(w, "database error", http.StatusServiceUnavailable)
+		return
+	}
+	// Import cuts a <trkseg> in several rows (every 1000 points or 50 km),
+	// and the next row starts at the last point of the one before. Here the
+	// rows are joined again, so the answer has one line per <trkseg>, like
+	// the GPX file. A row that does not start where the one before ends is
+	// a new line: the <trkseg> was cut at ±180°.
+	var coords []byte // the lines, as GeoJSON coordinates
+	var segments, lastTrack int
+	var last [3]float64
+	var trackid int
+	var wkb []byte
+	points = 0
+	_, err = pgx.ForEachRow(rows, []any{&trackid, &wkb}, func() error {
+		pts, ele, err := importer.ParseWKBLineStringZ(wkb)
+		if err != nil || len(pts) == 0 {
+			return err
+		}
+		first := 0
+		if segments > 0 && trackid == lastTrack && last == [3]float64{pts[0][0], pts[0][1], ele[0]} {
+			first = 1 // the point of the cut is already there
+			coords = coords[:len(coords)-1]
+		} else {
+			if segments > 0 {
+				coords = append(coords, ',')
+			}
+			coords = append(coords, '[')
+			segments++
+		}
+		for i := first; i < len(pts); i++ {
+			if i > 0 || first > 0 {
+				coords = append(coords, ',')
+			}
+			coords = appendCoord(coords, pts[i], ele[i])
+		}
+		coords = append(coords, ']')
+		points += int64(len(pts) - first)
+		lastTrack = trackid
+		n := len(pts) - 1
+		last = [3]float64{pts[n][0], pts[n][1], ele[n]}
+		return nil
+	})
 	if err != nil {
 		s.Log.Printf("trace %d: %v", id, err)
 		http.Error(w, "database error", http.StatusServiceUnavailable)
@@ -168,12 +234,25 @@ func (s *Server) trace(w http.ResponseWriter, r *http.Request) {
 		Properties: map[string]any{"id": id, "name": name, "segments": segments, "points": points},
 		Geometry:   json.RawMessage("null"),
 	}
-	if geom != nil {
-		feature.Geometry = json.RawMessage(*geom)
+	if segments > 0 {
+		feature.Geometry = json.RawMessage(`{"type":"MultiLineString","coordinates":[` + string(coords) + `]}`)
 	}
 	w.Header().Set("Content-Type", "application/geo+json")
 	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(feature)
+}
+
+// appendCoord writes one point as [lon,lat,ele], with the decimals of a GPX
+// file of OSM: 7 for lon and lat, 2 for the altitude. The altitude is stored
+// on a grid of 1/128 m (9.3 m is 9.296875), so it is rounded back.
+func appendCoord(b []byte, p importer.XY, ele float64) []byte {
+	b = append(b, '[')
+	b = strconv.AppendFloat(b, math.Round(p[0]*1e7)/1e7, 'f', -1, 64)
+	b = append(b, ',')
+	b = strconv.AppendFloat(b, math.Round(p[1]*1e7)/1e7, 'f', -1, 64)
+	b = append(b, ',')
+	b = strconv.AppendFloat(b, math.Round(ele*100)/100, 'f', -1, 64)
+	return append(b, ']')
 }
 
 // draw renders a tile, waiting for a free slot. When the same tile is
