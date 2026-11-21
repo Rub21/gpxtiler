@@ -136,6 +136,13 @@ func TestImportSync(t *testing.T) {
 	if n := count(t, conn, "SELECT count(*) FROM trace_segments_z8 WHERE ST_NDims(geom) <> 2"); n != 0 {
 		t.Errorf("the simplified copy should have no Z")
 	}
+	// The coordinates are stored the same as ST_QuantizeCoordinates gives them.
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments WHERE ST_AsEWKB(geom) <> ST_AsEWKB(ST_QuantizeCoordinates(geom, 2, 2, 2))"); n != 0 {
+		t.Errorf("%d lines are not quantized like ST_QuantizeCoordinates", n)
+	}
+	if n := count(t, conn, "SELECT count(*) FROM trace_segments_z8 WHERE ST_AsEWKB(geom) <> ST_AsEWKB(ST_QuantizeCoordinates(geom, 2, 2))"); n != 0 {
+		t.Errorf("%d simplified lines are not quantized like ST_QuantizeCoordinates", n)
+	}
 	var name, desc string
 	conn.QueryRow(ctx, "SELECT name, description FROM traces WHERE gpx_id = 1").Scan(&name, &desc)
 	if name != "Morning ride" || desc != "Vaduz <loop> & back" {

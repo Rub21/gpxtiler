@@ -24,8 +24,23 @@ func EWKBLineString(pts []XY) []byte {
 	return appendPoints(b, pts)
 }
 
+// coordGrid is the grid of the coordinates in the database: 1/128 m, about
+// 8 mm. It is the grid of ST_QuantizeCoordinates with 2 decimals: the first
+// power of 2 over 100.
+const coordGrid = 128
+
+// quantize rounds v to coordGrid, like ST_QuantizeCoordinates(geom, 2, 2, 2).
+// v still takes 8 bytes, but its last bits are zero and PostgreSQL
+// compresses them: the lines take about half the disk. v moves less than
+// 4 mm. A dump has lat and lon with 7 decimals, about 1 cm, and <ele> with
+// 2, so the values of the dump come back the same.
+func quantize(v float64) float64 {
+	return math.Round(v*coordGrid) / coordGrid
+}
+
 // EWKBLineStringZ returns a LineString with Z in EWKB with SRID 3857. ele is
 // the Z of every point, in meters; a point after the end of ele gets 0.
+// The coordinates are quantized.
 func EWKBLineStringZ(pts []XY, ele []float64) []byte {
 	b := make([]byte, 0, 13+24*len(pts))
 	b = append(b, 1) // little endian
@@ -37,14 +52,15 @@ func EWKBLineStringZ(pts []XY, ele []float64) []byte {
 		if i < len(ele) {
 			z = ele[i]
 		}
-		b = binary.LittleEndian.AppendUint64(b, math.Float64bits(p[0]))
-		b = binary.LittleEndian.AppendUint64(b, math.Float64bits(p[1]))
-		b = binary.LittleEndian.AppendUint64(b, math.Float64bits(z))
+		b = binary.LittleEndian.AppendUint64(b, math.Float64bits(quantize(p[0])))
+		b = binary.LittleEndian.AppendUint64(b, math.Float64bits(quantize(p[1])))
+		b = binary.LittleEndian.AppendUint64(b, math.Float64bits(quantize(z)))
 	}
 	return b
 }
 
 // EWKBMultiLineString returns a MultiLineString in EWKB with SRID 3857.
+// The coordinates are quantized.
 func EWKBMultiLineString(parts [][]XY) []byte {
 	b := []byte{1}
 	b = binary.LittleEndian.AppendUint32(b, wkbMultiLineString|ewkbSRIDFlag)
@@ -53,7 +69,11 @@ func EWKBMultiLineString(parts [][]XY) []byte {
 	for _, p := range parts {
 		b = append(b, 1)
 		b = binary.LittleEndian.AppendUint32(b, wkbLineString)
-		b = appendPoints(b, p)
+		b = binary.LittleEndian.AppendUint32(b, uint32(len(p)))
+		for _, pt := range p {
+			b = binary.LittleEndian.AppendUint64(b, math.Float64bits(quantize(pt[0])))
+			b = binary.LittleEndian.AppendUint64(b, math.Float64bits(quantize(pt[1])))
+		}
 	}
 	return b
 }
