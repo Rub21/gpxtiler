@@ -299,3 +299,28 @@ func TestGenerator(t *testing.T) {
 		t.Error("bad expire line should fail")
 	}
 }
+
+// Like datamaps, an edge inside half a pixel of the tile is not drawn.
+func TestSameCell(t *testing.T) {
+	// Half a pixel of a zoom 4 tile is 4892 m.
+	a := importer.XY{1000, 1000}
+	if !sameCell(a, importer.XY{1015, 1010}, 4) {
+		t.Errorf("a 18 m edge should be skipped at zoom 4")
+	}
+	if sameCell(a, importer.XY{6000, 1000}, 4) {
+		t.Errorf("an edge over the border of the cell should be drawn at zoom 4")
+	}
+	// Half a pixel of a zoom 16 tile is 1.2 m: the same edge is drawn.
+	if sameCell(a, importer.XY{1015, 1010}, 16) {
+		t.Errorf("a 18 m edge should be drawn at zoom 16")
+	}
+}
+
+// A simplified copy is dimmer than a line, and never brighter.
+func TestLowBright(t *testing.T) {
+	for z, v := range lowBright {
+		if v <= 0 || v > 1 {
+			t.Errorf("lowBright[%d] = %v", z, v)
+		}
+	}
+}

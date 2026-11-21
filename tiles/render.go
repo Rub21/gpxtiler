@@ -43,6 +43,34 @@ func jumpLength(z int) float64 {
 	return 1600 * worldUnit * math.Pow(1.5, float64(16-z))
 }
 
+// skipZoom: datamaps does not read an edge with both ends in the same tile
+// of zoom z + 9, half a pixel of the tile it draws (render.c, z_lookup).
+// At a low zoom most edges of a trace are that short, so a trace adds much
+// less brightness than its length.
+const skipZoom = 9
+
+// sameCell tells whether a and b are in the same tile of zoom z + skipZoom.
+func sameCell(a, b importer.XY, z int) bool {
+	cell := 2 * mercMax / float64(int64(1)<<(z+skipZoom))
+	return math.Floor((a[0]+mercMax)/cell) == math.Floor((b[0]+mercMax)/cell) &&
+		math.Floor((mercMax-a[1])/cell) == math.Floor((mercMax-b[1])/cell)
+}
+
+// lowBright is the brightness of a simplified copy at zoom z, as a share of
+// lineBright. A copy has no short edges to skip and no GPS jumps to dim, so
+// alone it is much brighter than datamaps: dense areas turn white.
+//
+// The values are the brightness datamaps gives the lines of trace_segments
+// (short edges skipped, long edges dimmed) divided by the brightness of
+// their copies. Measured on 1% of the traces of the 2013 dump (2406 traces,
+// 10 million edges), with the copies of zoom 5, 8, 11 and 14.
+var lowBright = [...]float64{
+	0.09, 0.11, 0.15, 0.19, 0.24, 0.29, // zoom 0-5
+	0.30, 0.36, 0.43, // zoom 6-8
+	0.45, 0.51, 0.56, // zoom 9-11
+	0.53, 0.48, 0.39, // zoom 12-14
+}
+
 // Renderer draws PNG tiles from the trace tables.
 type Renderer struct {
 	Pool *pgxpool.Pool
@@ -145,8 +173,12 @@ func (r *Renderer) Draw(ctx context.Context, z, x, y int) (*Canvas, error) {
 	jump := jumpLength(z)
 	if low {
 		// The simplified copies are already cut at the GPS jumps, and their
-		// long edges come from the simplification, so nothing is dimmed.
+		// long edges come from the simplification, so no edge is dimmed or
+		// skipped. All of them get the brightness of lowBright instead.
 		jump = math.Inf(1)
+		if z < len(lowBright) {
+			bright *= lowBright[z]
+		}
 	}
 
 	var wkb []byte
@@ -159,6 +191,9 @@ func (r *Renderer) Draw(ctx context.Context, z, x, y int) (*Canvas, error) {
 			a, b := pts[i-1], pts[i]
 			dx, dy := b[0]-a[0], b[1]-a[1]
 			if dx == 0 && dy == 0 {
+				continue
+			}
+			if !low && sameCell(a, b, z) {
 				continue
 			}
 			br := bright
