@@ -245,18 +245,18 @@ func TestServer(t *testing.T) {
 	_, err := pool.Exec(context.Background(), `
 		INSERT INTO traces (gpx_id) VALUES (2);
 		INSERT INTO trace_segments (gpx_id, trackid, segment, year, mode, geom)
-		SELECT 2, trackid, segment, 2026, 0, ST_Transform(ST_GeomFromText(wkt, 4326), 3857)
+		SELECT 2, trackid, segment, 2026, mode, ST_Transform(ST_GeomFromText(wkt, 4326), 3857)
 		FROM (VALUES
-			(0, 0, 'LINESTRING Z (9.60 47.20 1, 9.61 47.20 2)'),
-			(0, 1, 'LINESTRING Z (9.61 47.20 2, 9.62 47.21 3)'),
-			(0, 2, 'LINESTRING Z (9.70 47.30 4, 9.71 47.31 5)'),
-			(1, 0, 'LINESTRING Z (9.80 47.40 6, 9.81 47.41 7)')
-		) v(trackid, segment, wkt)`)
+			(0, 0, 1, 'LINESTRING Z (9.60 47.20 1, 9.61 47.20 2)'),
+			(0, 1, 1, 'LINESTRING Z (9.61 47.20 2, 9.62 47.21 3)'),
+			(0, 2, 3, 'LINESTRING Z (9.70 47.30 4, 9.71 47.31 5)'),
+			(1, 0, 4, 'LINESTRING Z (9.80 47.40 6, 9.81 47.41 7)')
+		) v(trackid, segment, mode, wkt)`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, body = get("/traces/2")
-	for _, want := range []string{`"segments":3`, `"points":7`, `[[9.6,47.2,1],[9.61,47.2,2],[9.62,47.21,3]]`, `[[9.7,47.3,4],[9.71,47.31,5]]`} {
+	for _, want := range []string{`"segments":3`, `"points":7`, `"modes":["walk","vehicle","plane"]`, `[[9.6,47.2,1],[9.61,47.2,2],[9.62,47.21,3]]`, `[[9.7,47.3,4],[9.71,47.31,5]]`} {
 		if !bytes.Contains(body, []byte(want)) {
 			t.Errorf("trace 2 without %s: %s", want, body)
 		}

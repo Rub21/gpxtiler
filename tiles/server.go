@@ -137,7 +137,8 @@ func (s *Server) tile(w http.ResponseWriter, r *http.Request) {
 
 // trace answers /traces/{id} with the trace as a GeoJSON Feature: the same
 // lines and points as the GPX file, one line per <trkseg>, with the altitude
-// as the third coordinate. The viewer draws it and shows what was loaded.
+// as the third coordinate, and "modes" with the transport mode of each
+// line. The viewer draws it and shows what was loaded.
 // 404 when the trace is not in the database, 413 when it has more points
 // than TraceMaxPoints.
 func (s *Server) trace(w http.ResponseWriter, r *http.Request) {
@@ -171,7 +172,7 @@ func (s *Server) trace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.Renderer.Pool.Query(r.Context(), `
-		SELECT trackid, ST_AsEWKB(ST_Transform(geom, 4326))
+		SELECT trackid, mode, ST_AsEWKB(ST_Transform(geom, 4326))
 		FROM trace_segments
 		WHERE gpx_id = $1
 		ORDER BY trackid, segment`, id)
@@ -185,13 +186,18 @@ func (s *Server) trace(w http.ResponseWriter, r *http.Request) {
 	// rows are joined again, so the answer has one line per <trkseg>, like
 	// the GPX file. A row that does not start where the one before ends is
 	// a new line: the <trkseg> was cut at ±180°.
+	//
+	// modes has the transport mode of each line, in the same order. Import
+	// gives one mode to all the rows it cuts from a line.
 	var coords []byte // the lines, as GeoJSON coordinates
+	modes := []string{}
 	var segments, lastTrack int
 	var last [3]float64
 	var trackid int
+	var mode int16
 	var wkb []byte
 	points = 0
-	_, err = pgx.ForEachRow(rows, []any{&trackid, &wkb}, func() error {
+	_, err = pgx.ForEachRow(rows, []any{&trackid, &mode, &wkb}, func() error {
 		pts, ele, err := importer.ParseWKBLineStringZ(wkb)
 		if err != nil || len(pts) == 0 {
 			return err
@@ -206,6 +212,7 @@ func (s *Server) trace(w http.ResponseWriter, r *http.Request) {
 			}
 			coords = append(coords, '[')
 			segments++
+			modes = append(modes, modeName(mode))
 		}
 		for i := first; i < len(pts); i++ {
 			if i > 0 || first > 0 {
@@ -231,7 +238,7 @@ func (s *Server) trace(w http.ResponseWriter, r *http.Request) {
 		Geometry   json.RawMessage `json:"geometry"`
 	}{
 		Type:       "Feature",
-		Properties: map[string]any{"id": id, "name": name, "segments": segments, "points": points},
+		Properties: map[string]any{"id": id, "name": name, "segments": segments, "points": points, "modes": modes},
 		Geometry:   json.RawMessage("null"),
 	}
 	if segments > 0 {
@@ -240,6 +247,22 @@ func (s *Server) trace(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/geo+json")
 	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(feature)
+}
+
+// modeName is the transport mode of a line, with the names of the vector
+// tile layers.
+func modeName(m int16) string {
+	switch importer.Mode(m) {
+	case importer.ModeWalk:
+		return "walk"
+	case importer.ModeBike:
+		return "bike"
+	case importer.ModeVehicle:
+		return "vehicle"
+	case importer.ModePlane:
+		return "plane"
+	}
+	return "unknown"
 }
 
 // appendCoord writes one point as [lon,lat,ele], with the decimals of a GPX
