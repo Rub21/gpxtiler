@@ -139,7 +139,7 @@ func buildRows(t *Trace, cfg SplitConfig) *parsed {
 		lines, lowGroups := BuildTrack(pts, t.Uploaded, traceMode, cfg)
 		for i, l := range lines {
 			fmt.Fprintf(&seg, "%d\t%d\t%d\t%d\t%d\t%s\t%s\t%s\n", t.ID, trackid, i, l.Year, l.Mode,
-				hex.EncodeToString(EWKBLineString(l.Points)), copyTime(l.Start), copyTime(l.End))
+				hex.EncodeToString(EWKBLineStringZ(l.Points, l.Ele)), copyTime(l.Start), copyTime(l.End))
 			p.n++
 		}
 		p.lines = append(p.lines, lines...)

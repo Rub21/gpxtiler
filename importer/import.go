@@ -374,7 +374,7 @@ func deleteTraces(ctx context.Context, conn *pgx.Conn, ids []int64, exp *Expire)
 			return i, err
 		}
 		if exp != nil {
-			rows, err := tx.Query(ctx, "SELECT ST_AsBinary(geom) FROM trace_segments WHERE gpx_id = ANY($1)", part)
+			rows, err := tx.Query(ctx, "SELECT ST_AsBinary(ST_Force2D(geom)) FROM trace_segments WHERE gpx_id = ANY($1)", part)
 			if err != nil {
 				tx.Rollback(ctx)
 				return i, err

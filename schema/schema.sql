@@ -17,14 +17,16 @@ CREATE TABLE IF NOT EXISTS trace_tags (
 -- year: the GPS year of the first point when it is possible, else the upload
 -- year. mode: transport from the median speed, 0 unknown, 1 walk, 2 bike,
 -- 3 vehicle, 4 plane. The primary key has year because the partition key
--- must be part of every unique key.
+-- must be part of every unique key. geom has the altitude of every point in
+-- Z, in meters: 0 when the point has no <ele>, like gps_points.altitude on
+-- the website. The simplified copies have no Z.
 CREATE TABLE IF NOT EXISTS trace_segments (
     gpx_id     bigint,
     trackid    int,                        -- position of the <trkseg> in the trace
     segment    int,                        -- piece inside the trackid
     year       smallint NOT NULL,
     mode       smallint NOT NULL,
-    geom       geometry(LineString, 3857),
+    geom       geometry(LineStringZ, 3857),
     started_at timestamptz,
     ended_at   timestamptz,
     PRIMARY KEY (gpx_id, trackid, segment, year)

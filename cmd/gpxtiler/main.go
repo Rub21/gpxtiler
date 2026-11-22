@@ -207,6 +207,7 @@ func runServe(args []string) error {
 	maxRenders := fs.Int("max-renders", runtime.NumCPU(), "tiles drawn at the same time")
 	maxAge := fs.Duration("max-age", time.Hour, "Cache-Control max-age of the tiles")
 	timeout := fs.Duration("timeout", 30*time.Second, "stop drawing a tile after this time")
+	traceMaxPoints := fs.Int("trace-max-points", envInt("GPXTILER_TRACE_MAX_POINTS", 100000), "/traces/{id} answers 413 for a trace with more points; 0 turns /traces/{id} off (env GPXTILER_TRACE_MAX_POINTS)")
 	fs.Parse(args)
 	if fs.NArg() != 0 {
 		return fmt.Errorf("serve takes no arguments\n\n%s", usage)
@@ -241,6 +242,8 @@ func runServe(args []string) error {
 		MaxAge:    *maxAge,
 		Timeout:   *timeout,
 		Log:       log.Default(),
+
+		TraceMaxPoints: *traceMaxPoints,
 	}
 	hs := &http.Server{Addr: *listen, Handler: srv.Handler(*maxRenders), ReadHeaderTimeout: 10 * time.Second}
 	go func() {

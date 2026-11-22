@@ -29,7 +29,7 @@ const vaduz = `<?xml version="1.0" encoding="UTF-8"?>
 <gpx version="1.0" xmlns="http://www.topografix.com/GPX/1/0" xmlns:osm="https://www.openstreetmap.org/gpx/0.1">
  <time>2026-10-31T00:00:00Z</time>
  <trk><osm:id>1</osm:id><trkseg>
-  <trkpt lat="47.1400" lon="9.5200"/><trkpt lat="47.1400" lon="9.5210"/><trkpt lat="47.1400" lon="9.5220"/>
+  <trkpt lat="47.1400" lon="9.5200"><ele>455.3</ele></trkpt><trkpt lat="47.1400" lon="9.5210"/><trkpt lat="47.1400" lon="9.5220"/>
  </trkseg></trk>
 </gpx>
 `
@@ -159,6 +159,8 @@ func TestServer(t *testing.T) {
 		MaxAge:    time.Hour,
 		Timeout:   10 * time.Second,
 		Log:       log.New(io.Discard, "", 0),
+
+		TraceMaxPoints: 8,
 	}
 	srv := httptest.NewServer(s.Handler(2))
 	defer srv.Close()
@@ -233,6 +235,51 @@ func TestServer(t *testing.T) {
 	if resp.StatusCode != 200 || !bytes.Contains(body, []byte(`"segments":`)) || !bytes.Contains(body, []byte(`"type":"MultiLineString"`)) {
 		t.Errorf("trace 1: %d %s", resp.StatusCode, body)
 	}
+	// The altitude is the third coordinate, with the decimals of <ele> (it is
+	// stored as 455.296875), 0 for a point without <ele>.
+	if !bytes.Contains(body, []byte(`[9.52,47.14,455.3]`)) || !bytes.Contains(body, []byte(`[9.522,47.14,0]`)) {
+		t.Errorf("trace 1 without altitude: %s", body)
+	}
+	// The rows that import cut from one <trkseg> come back as one line. A
+	// row that does not start where the one before ends is another line.
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO traces (gpx_id) VALUES (2);
+		INSERT INTO trace_segments (gpx_id, trackid, segment, year, mode, geom)
+		SELECT 2, trackid, segment, 2026, mode, ST_Transform(ST_GeomFromText(wkt, 4326), 3857)
+		FROM (VALUES
+			(0, 0, 1, 'LINESTRING Z (9.60 47.20 1, 9.61 47.20 2)'),
+			(0, 1, 1, 'LINESTRING Z (9.61 47.20 2, 9.62 47.21 3)'),
+			(0, 2, 3, 'LINESTRING Z (9.70 47.30 4, 9.71 47.31 5)'),
+			(1, 0, 4, 'LINESTRING Z (9.80 47.40 6, 9.81 47.41 7)')
+		) v(trackid, segment, mode, wkt)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, body = get("/traces/2")
+	for _, want := range []string{`"segments":3`, `"points":7`, `"modes":["walk","vehicle","plane"]`, `[[9.6,47.2,1],[9.61,47.2,2],[9.62,47.21,3]]`, `[[9.7,47.3,4],[9.71,47.31,5]]`} {
+		if !bytes.Contains(body, []byte(want)) {
+			t.Errorf("trace 2 without %s: %s", want, body)
+		}
+	}
+	// A trace with more points than TraceMaxPoints is not served. Its rows
+	// have 10 points: the limit counts the point of a cut twice.
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO trace_segments (gpx_id, trackid, segment, year, mode, geom)
+		VALUES (2, 2, 0, 2026, 0, ST_Transform(ST_GeomFromText('LINESTRING Z (9.90 47.50 8, 9.91 47.51 9)', 4326), 3857))`); err != nil {
+		t.Fatal(err)
+	}
+	if resp, body := get("/traces/2"); resp.StatusCode != 413 || !bytes.Contains(body, []byte("the limit is 8")) {
+		t.Errorf("big trace: %d %s", resp.StatusCode, body)
+	}
+	if resp, _ := get("/traces/1"); resp.StatusCode != 200 {
+		t.Errorf("small trace after the big one: %d", resp.StatusCode)
+	}
+	// TraceMaxPoints 0 turns /traces/{id} off.
+	off := httptest.NewServer((&Server{Renderer: s.Renderer, MaxZoom: 20, Log: s.Log}).Handler(1))
+	defer off.Close()
+	if resp, err := http.Get(off.URL + "/traces/1"); err != nil || resp.StatusCode != 404 {
+		t.Errorf("/traces/1 with TraceMaxPoints 0: %v %v", resp, err)
+	}
 	if resp, _ := get("/traces/999999"); resp.StatusCode != 404 {
 		t.Errorf("missing trace: %d, want 404", resp.StatusCode)
 	}
@@ -293,5 +340,30 @@ func TestGenerator(t *testing.T) {
 	os.WriteFile(filepath.Join(exp, "expire-2.txt"), []byte("9/x/y\n"), 0o644)
 	if _, err := g.Expire(ctx, exp, 0, 9, 14); err == nil {
 		t.Error("bad expire line should fail")
+	}
+}
+
+// Like datamaps, an edge inside half a pixel of the tile is not drawn.
+func TestSameCell(t *testing.T) {
+	// Half a pixel of a zoom 4 tile is 4892 m.
+	a := importer.XY{1000, 1000}
+	if !sameCell(a, importer.XY{1015, 1010}, 4) {
+		t.Errorf("a 18 m edge should be skipped at zoom 4")
+	}
+	if sameCell(a, importer.XY{6000, 1000}, 4) {
+		t.Errorf("an edge over the border of the cell should be drawn at zoom 4")
+	}
+	// Half a pixel of a zoom 16 tile is 1.2 m: the same edge is drawn.
+	if sameCell(a, importer.XY{1015, 1010}, 16) {
+		t.Errorf("a 18 m edge should be drawn at zoom 16")
+	}
+}
+
+// A simplified copy is dimmer than a line, and never brighter.
+func TestLowBright(t *testing.T) {
+	for z, v := range lowBright {
+		if v <= 0 || v > 1 {
+			t.Errorf("lowBright[%d] = %v", z, v)
+		}
 	}
 }

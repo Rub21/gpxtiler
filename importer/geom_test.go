@@ -1,7 +1,9 @@
 package importer
 
 import (
+	"encoding/binary"
 	"math"
+	"slices"
 	"testing"
 	"time"
 )
@@ -130,6 +132,80 @@ func TestSimplify(t *testing.T) {
 	}
 }
 
+// Every line keeps the altitude of its points, also at a cut: the border
+// point is in both lines with the same altitude.
+func TestBuildTrackKeepsEle(t *testing.T) {
+	pts := []Point{{Lon: 9.50, Lat: 47.1, Ele: 450.5}, {Lon: 9.51, Lat: 47.1}, {Lon: 9.52, Lat: 47.1, Ele: 460}, {Lon: 9.53, Lat: 47.1, Ele: -3}}
+	lines, _ := BuildTrack(pts, testUploaded, ModeUnknown, SplitConfig{MaxPoints: 3, MaxLength: 1e9})
+	if len(lines) != 2 {
+		t.Fatalf("lines = %+v", lines)
+	}
+	if !slices.Equal(lines[0].Ele, []float64{450.5, 0, 460}) || !slices.Equal(lines[1].Ele, []float64{460, -3}) {
+		t.Errorf("ele = %v %v", lines[0].Ele, lines[1].Ele)
+	}
+}
+
+// The point added at ±180° gets the altitude between its neighbors, or 0
+// when one of them has none.
+func TestBuildTrackDatelineEle(t *testing.T) {
+	cfg := SplitConfig{MaxPoints: 1000, MaxLength: 1e9}
+	lines, _ := BuildTrack([]Point{{Lon: 179.9, Lat: 10, Ele: 100}, {Lon: -179.9, Lat: 10, Ele: 300}}, testUploaded, ModeUnknown, cfg)
+	if len(lines) != 2 || !near(lines[0].Ele[1], 200, 0.01) || !near(lines[1].Ele[0], 200, 0.01) {
+		t.Errorf("with altitude: %+v", lines)
+	}
+	lines, _ = BuildTrack([]Point{{Lon: 179.9, Lat: 10, Ele: 100}, {Lon: -179.9, Lat: 10}}, testUploaded, ModeUnknown, cfg)
+	if len(lines) != 2 || lines[0].Ele[1] != 0 || lines[1].Ele[0] != 0 {
+		t.Errorf("one side without altitude: %+v", lines)
+	}
+}
+
+// EWKB of a LineString with Z: type 2 with the SRID and Z flags, then x, y
+// and z of every point. A missing altitude is 0.
+func TestEWKBLineStringZ(t *testing.T) {
+	b := EWKBLineStringZ([]XY{{1, 2}, {3.5, -4.25}}, []float64{450.5})
+	if len(b) != 13+24*2 {
+		t.Fatalf("%d bytes", len(b))
+	}
+	if typ := binary.LittleEndian.Uint32(b[1:5]); typ != 0xA0000002 {
+		t.Errorf("type = %#x", typ)
+	}
+	f := func(off int) float64 { return math.Float64frombits(binary.LittleEndian.Uint64(b[off:])) }
+	if f(13) != 1 || f(21) != 2 || f(29) != 450.5 || f(37) != 3.5 || f(45) != -4.25 || f(53) != 0 {
+		t.Errorf("coordinates wrong: % x", b[13:])
+	}
+}
+
+// quantize moves a coordinate less than 4 mm, so lat and lon are still the
+// same with the 7 decimals of the dump, and <ele> with its 2 decimals.
+func TestQuantize(t *testing.T) {
+	for _, v := range []float64{0, 1, -4.25, 450.5, 8848.86, -0.07, 1059761.4837265921, -20037508.342789244, 0.004999} {
+		q := quantize(v)
+		if math.Abs(q-v) > 1.0/256 {
+			t.Errorf("quantize(%v) = %v", v, q)
+		}
+		if math.Float64bits(q)&0xff != 0 {
+			t.Errorf("quantize(%v) = %v keeps the low bits", v, q)
+		}
+		if ele := math.Round(v*100) / 100; math.Round(quantize(ele)*100)/100 != ele {
+			t.Errorf("ele %v came back as %v", ele, quantize(ele))
+		}
+	}
+	back := func(p XY) (lon, lat float64) {
+		lon = p[0] / earthRadius * 180 / math.Pi
+		lat = (2*math.Atan(math.Exp(p[1]/earthRadius)) - math.Pi/2) * 180 / math.Pi
+		return math.Round(lon*1e7) / 1e7, math.Round(lat*1e7) / 1e7
+	}
+	for i := 0; i < 20000; i++ {
+		lon := math.Round((-180+float64(i)*0.0179999137)*1e7) / 1e7
+		lat := math.Round((-84+float64(i)*0.0083999731)*1e7) / 1e7
+		p := ToMercator(lon, lat)
+		gotLon, gotLat := back(XY{quantize(p[0]), quantize(p[1])})
+		if gotLon != lon || gotLat != lat {
+			t.Fatalf("%v %v came back as %v %v", lon, lat, gotLon, gotLat)
+		}
+	}
+}
+
 func TestWKBRoundTrip(t *testing.T) {
 	pts := []XY{{1, 2}, {3.5, -4.25}}
 	got, err := ParseWKBLineString(EWKBLineString(pts))
@@ -237,5 +313,15 @@ func TestBuildTrackNoTimes(t *testing.T) {
 	}
 	if len(lows[8][LowKey{2020, ModeUnknown}]) != 1 {
 		t.Errorf("low = %v", lows[8])
+	}
+}
+
+func TestParseWKBLineStringZ(t *testing.T) {
+	pts, ele, err := ParseWKBLineStringZ(EWKBLineStringZ([]XY{{1, 2}, {3.5, -4.25}}, []float64{450.5, 7}))
+	if err != nil || len(pts) != 2 || pts[1] != (XY{3.5, -4.25}) || ele[0] != 450.5 || ele[1] != 7 {
+		t.Errorf("got %v %v %v", pts, ele, err)
+	}
+	if _, _, err := ParseWKBLineStringZ(EWKBLineString([]XY{{1, 2}, {3, 4}})); err == nil {
+		t.Errorf("a 2D line should not be read as a line with Z")
 	}
 }
